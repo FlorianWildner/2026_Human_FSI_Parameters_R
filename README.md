@@ -7,15 +7,15 @@ All data have been pseudonymized to ensure protection of personal information.
 ---
 
 ## Repository structure
-
-data/
-Human_IN_Properties.csv
-WFA_HUMAN_QUANT_IMARIS_PatA.csv
-WFA_HUMAN_QUANT_IMARIS_PatB.csv
-WFA_HUMAN_QUANT_IMARIS_PatC.csv
-
-FSIN_intrinsic.Rmd
-WFA_IMARIS.R
+  
+  data/
+  Human_IN_Properties.csv
+  WFA_HUMAN_QUANT_IMARIS_PatA.csv
+  WFA_HUMAN_QUANT_IMARIS_PatB.csv
+  WFA_HUMAN_QUANT_IMARIS_PatC.csv
+  
+  FSIN_intrinsic.Rmd
+  WFA_IMARIS.R
 
 
 ---
