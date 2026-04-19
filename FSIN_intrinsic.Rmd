@@ -1,0 +1,2556 @@
+---
+title: "Human FSI intrinsic ephys parameters analysis"
+author: "Florian Wildner"
+date: "14.04.2026"
+output:
+  html_document: default
+
+# Version notes
+version: "16.12 – inclusion of anatomy data"
+last_changes: "Reordered protocols to align with manuscript structure"
+---
+
+\tiny
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = 'center',
+  fig.width = 5,
+  fig.height = 4
+)
+
+# -----------------------------
+# Libraries
+# -----------------------------
+library(umap)
+library(ggcorrplot)
+library(ggplot2)
+library(ggpubr)
+library(sigclust)
+library(dendextend)
+library(rstatix)
+library(viridis)
+library(gridExtra)
+library(scico)
+library(gghalves)
+library(tidyverse)
+library(dplyr)
+
+# -----------------------------
+# Output directory + save helper
+# -----------------------------
+
+# create date string (YYMMDD)
+date_str <- format(Sys.Date(), "%y%m%d")
+
+# relative output path (inside project folder)
+out_dir <- file.path("output", date_str)
+
+# create directory if it doesn't exist
+if (!dir.exists(out_dir)) {
+  dir.create(out_dir, recursive = TRUE)
+}
+
+options(fig_out_dir = out_dir)
+
+save_fig <- function(plot, name, w = 5, h = 4, device = "eps") {
+
+  out_dir <- getOption("fig_out_dir")
+
+  ggsave(
+    filename = file.path(out_dir, paste0(name, ".", device)),
+    plot = plot,
+    width = w,
+    height = h,
+    units = "in",
+    device = device
+  )
+}
+```
+\large
+# **General analysis approach**
+\small
+## 0.1 Load and prepare data
+Raw electrophysiological data are loaded from CSV, filtered for cell identity, and split into metadata and numeric features. Quality control excludes recordings with depolarized resting membrane potentials.
+\tiny
+```{r}
+# -----------------------------
+# Load data
+# -----------------------------
+col <- c(
+  "c","c","n","c","c",
+  "c","c","c","c","c","c",
+  "n","c","c",
+  "n","n","n","n","n","n","n","n","n","n",
+  "n","n","n","n","n","n","n","n","n","n",
+  "n","n","n","n","n","n","n","n"
+)
+
+df_original <- read_csv(
+  "/Users/flo/Desktop/research/Human/Human_data/intrinsic_properties/Human_IN_Properties_260124.csv",
+  col_types = col
+)
+
+# df_original <- read_csv(
+#   file.path("data", "Human_IN_Properties.csv"),
+#   col_types = col
+# )
+
+# -----------------------------
+# Filter datasets
+# -----------------------------
+df_sel <- df_original %>%
+  filter(ident %in% c("WFA+", "DCF+"))
+
+df_all <- df_original %>%
+  filter(ident %in% c("WFA+", "DCF+", "none"))
+
+df <- df_sel
+# df <- df_all
+
+# -----------------------------
+# QC threshold
+# -----------------------------
+rmp_cutoff <- -50
+
+# -----------------------------
+# Split metadata vs numeric data
+# -----------------------------
+df_meta <- select(df, cell, pat, age, sex, patho, area, clinic,
+                  transport, put_type, ident, burst)
+
+df_anat_raw <- select(df, cell, anat_morph, anat_dist, anat_pv, anat_sst)
+
+df_dbl <- select(df,
+  cell, RMP, CC_Rm, rheobase, CC_tau, sag_ratio,
+  freq_max, f_i_slope, onset_lat,
+  isi_first, isi_avg, isi_cv, isi_adapt,
+  amp_cv, amp_adapt,
+  ap_amp, ap_thresh, ap_width,
+  ap_rise, ap_decay,
+  ap_upstroke, ap_downstroke, ap_UDR,
+  fAHP_amp, fAHP_time
+)
+
+# -----------------------------
+# Clean dataset
+# -----------------------------
+df_dbl <- df_dbl %>%
+  drop_na() %>%
+  filter(RMP <= rmp_cutoff)
+
+cells <- select(df_dbl, cell)
+df_dbl <- select(df_dbl, -cell)
+
+```
+\small
+## 0.2 Setup visualization
+1. Define consistent color palette (Okabe-Ito) for identification methods and clusters
+2. Create parameter dictionary for publication-ready axis labels
+\tiny
+```{r}
+# -----------------------------
+# Color palette (Okabe–Ito)
+# -----------------------------
+my_colors <- c(
+  "WFA+" = "#CC79A7",
+  "DCF+" = "#94D4C6",
+  "1" = "#56B4E9",
+  "2" = "#E69F00",
+  "3" = "#D55E00",
+  "none" = "#999999",
+  "classical FSI" = "#56B4E9",
+  "non-FSI" = "#E69F00",
+  "borderline-FSI" = "#D55E00"
+)
+
+# -----------------------------
+# Publication label dictionary
+# -----------------------------
+param_dict <- c(
+  amp_adapt = "Amplitude adaptation index",
+  amp_cv = "Amplitude CV",
+  ap_amp = "AP amplitude (mV)",
+  ap_decay = "AP decay time (ms)",
+  ap_downstroke = "AP downstroke (mV/ms)",
+  ap_rise = "AP rise time (mV/ms)",
+  ap_thresh = "AP threshold (mV)",
+  ap_UDR = "AP upstroke/downstroke ratio",
+  ap_upstroke = "AP upstroke (ms)",
+  ap_width = "AP width (ms)",
+  CC_Rm = "Input resistance (MΩ)",
+  CC_tau = "Membrane tau (ms)",
+  f_i_slope = "F/I slope (Hz/mV)",
+  fAHP_amp = "fAHP amplitude (mV)",
+  fAHP_time = "fAHP time (ms)",
+  freq_max = "Max. firing rate (Hz)",
+  isi_adapt = "ISI adaptation index",
+  isi_avg = "ISI mean (ms)",
+  isi_cv = "ISI CV",
+  isi_first = "First ISI (ms)",
+  onset_lat = "Onset latency (ms)",
+  rheobase = "Rheobase (pA)",
+  RMP = "Resting membrane potential (mV)",
+  sag_ratio = "Sag ratio"
+)
+
+# -----------------------------
+# Publication label dictionary
+# without special characters
+# -----------------------------
+
+# Parameter dictionary without special characters
+param_dict_safe <- c(
+  amp_adapt    = "Amplitude adaptation index",
+  amp_cv       = "Amplitude CV",
+  ap_amp       = "AP amplitude (mV)",
+  ap_decay     = "AP decay time (ms)",
+  ap_downstroke= "AP downstroke (mV/ms)",
+  ap_rise      = "AP rise time (mV/ms)",
+  ap_thresh    = "AP threshold (mV)",
+  ap_UDR       = "AP upstroke/downstroke ratio",
+  ap_upstroke  = "AP upstroke (ms)",
+  ap_width     = "AP width (ms)",
+  CC_Rm        = "Input resistance (MOhm)",
+  CC_tau       = "Membrane tau (ms)",
+  f_i_slope    = "F/I slope (Hz/mV)",
+  fAHP_amp     = "fAHP amplitude (mV)",
+  fAHP_time    = "fAHP time (ms)",
+  freq_max     = "Max. spiking frequency (Hz)",
+  isi_adapt    = "ISI adaptation index",
+  isi_avg      = "ISI average (ms)",
+  isi_cv       = "ISI CV (ms)",
+  isi_first    = "ISI first (ms)",
+  onset_lat    = "Onset latency (ms)",
+  rheobase     = "Rheobase (pA)",
+  RMP          = "RMP (mV)",
+  sag_ratio    = "Sag ratio (mV)"
+)
+```
+\small
+## 0.3 Quality control: Compare input resistance (VC_Rs) and RMP between methods
+1. Boxplots + normality tests (Shapiro-Wilk) + appropriate statistical test (t-test/Wilcoxon)
+2. Ensures comparable recording quality between DCF+ and WFA+ identified cells
+\tiny
+```{r}
+# Subset the data for the two groups (DCF+ and WFA+)
+df_subset <- df %>%
+  filter(ident %in% c("DCF+", "WFA+")) %>%
+  filter(RMP <= rmp_cutoff)
+
+# VC_Rs comparison
+ggplot(df_subset, aes(ident, VC_Rs, fill = ident)) +
+  geom_boxplot() +
+  geom_point(position = position_jitter(width = 0.1), size = 1) +
+  scale_fill_manual(values = my_colors) +
+  theme_minimal() +
+  labs(x = "Group", y = "VC_Rs")
+
+# Normality tests
+shapiro_dcf <- shapiro.test(df_subset$VC_Rs[df_subset$ident == "DCF+"])
+shapiro_wfa <- shapiro.test(df_subset$VC_Rs[df_subset$ident == "WFA+"])
+
+if (shapiro_dcf$p.value > 0.05 & shapiro_wfa$p.value > 0.05) {
+  t.test(VC_Rs ~ ident, data = df_subset)
+} else {
+  wilcox.test(VC_Rs ~ ident, data = df_subset)
+}
+
+# Same for RMP
+ggplot(df_subset, aes(ident, RMP, fill = ident)) +
+  geom_boxplot() +
+  geom_point(position = position_jitter(width = 0.1), size = 1) +
+  scale_fill_manual(values = my_colors) +
+  theme_minimal()
+
+# Shapiro-Wilk normality test for each group
+shapiro_dcf <- shapiro.test(df_subset$RMP[df_subset$ident == "DCF+"])
+shapiro_wfa <- shapiro.test(df_subset$RMP[df_subset$ident == "WFA+"])
+
+# Check if data is normally distributed
+if (shapiro_dcf$p.value > 0.05 & shapiro_wfa$p.value > 0.05) {
+  # Perform a t-test if data is normally distributed
+  t_test_result <- t.test(RMP ~ ident, data = df_subset)
+  print("T-test result for RMP (DCF+ vs. WFA+):")
+  print(t_test_result)
+} else {
+  # Perform a non-parametric Wilcoxon test if data is not normally distributed
+  wilcox_test_result <- wilcox.test(RMP ~ ident, data = df_subset)
+  print("Wilcoxon test result (non-parametric test) for RMP (DCF+ vs. WFA+)::")
+  print(wilcox_test_result)
+}
+```
+\large
+# 1.: Comparing identification methods (DCF vs WFA) (Fig 1)
+MANOVA → univariate tests → pairwise comparisons
+1. MANOVA between WFA and DCF\
+2. univariate tests
+3. pairwise comparisons
+\small
+## 1.1: Pre-process for analysis: create data frame df_int 
+```{r}
+# Initialize dataframe
+df_int <- select(df,cell,ident,put_type,
+                RMP,CC_Rm,CC_tau,sag_ratio,rheobase,
+                freq_max, f_i_slope, onset_lat,
+                isi_first, isi_avg, isi_cv, isi_adapt,
+                amp_cv, amp_adapt,
+                ap_amp, ap_thresh, ap_width,
+                ap_rise, ap_decay, 
+                ap_upstroke, ap_downstroke, ap_UDR, 
+                fAHP_amp, fAHP_time) 
+df_int<-drop_na(df_int)%>%
+  filter(RMP <= rmp_cutoff)  # Exclude RMP > cutoff
+# Ensure ident is a factor
+df_int$ident <- factor(df_int$ident, levels = c("DCF+", "WFA+"))
+```
+\small
+## 1.2: Comparison of electrophysiological parameters between DCF+ and WFA+
+1. A multivariate analysis of variance (MANOVA) was used to test for overall group differences across all 24 electrophysiological parameters between DCF+ and WFA+ neurons.
+2. If the MANOVA was significant, univariate follow-up tests were performed for each parameter:
+   - Normality was assessed per parameter within each group (Shapiro–Wilk test)
+   - Depending on distribution, either an independent t-test (parametric) or Wilcoxon rank-sum test (non-parametric) was applied
+   - P-values were corrected for multiple comparisons using the Benjamini–Hochberg false discovery rate (FDR)
+   - Effect sizes were calculated using Cohen’s d
+3. Visualization:
+   - Significant parameters (FDR-corrected) were visualized
+   - A predefined subset of key physiological parameters was additionally plotted (**Figure 1C**)
+4. A summary table including all parameters, statistical results, and effect sizes was generated for the supplement (**Supplementary Table 1**)
+```{r}
+# --- Prepare data for MANOVA ---
+df_manova <- df_int %>%
+  select(ident,
+         RMP, CC_Rm, CC_tau, sag_ratio, rheobase,
+         freq_max, f_i_slope, onset_lat,
+         isi_first, isi_avg, isi_cv, isi_adapt,
+         amp_cv, amp_adapt,
+         ap_amp, ap_thresh, ap_width,
+         ap_rise, ap_decay,
+         ap_upstroke, ap_downstroke, ap_UDR,
+         fAHP_amp, fAHP_time) %>%
+  drop_na()
+
+# Get parameter names
+param_names <- setdiff(names(df_manova), "ident")
+
+cat("Sample sizes:\n")
+print(table(df_manova$ident))
+
+# --- STEP 1: PRIMARY TEST - MANOVA ---
+cat("\n=== MANOVA: Overall Multivariate Test ===\n")
+cat("Null hypothesis: WFA+ and DCF+ have identical multivariate means across all 24 parameters\n\n")
+
+manova_model <- manova(as.matrix(df_manova[, param_names]) ~ ident, 
+                       data = df_manova)
+
+# Use Pillai's trace
+manova_summary <- summary(manova_model, test = "Pillai")
+print(manova_summary)
+
+# Extract p-value
+manova_p <- manova_summary$stats[1, "Pr(>F)"]
+
+# --- STEP 2: FOLLOW-UP UNIVARIATE TESTS (only if MANOVA significant) ---
+if (manova_p < 0.05) {
+  
+  cat("\n=== MANOVA is significant (p < 0.05) ===")
+  cat("\nProceeding to univariate tests to identify which parameters differ...\n\n")
+  
+  # Reshape for testing
+  df_long <- df_manova %>%
+    pivot_longer(cols = all_of(param_names), 
+                 names_to = "Parameter", 
+                 values_to = "Value")
+  
+  # Normality check per parameter per group
+  normality <- df_long %>%
+    group_by(Parameter, ident) %>%
+    summarise(
+      n = n(),
+      p.normality = if(n() >= 3) shapiro.test(Value)$p.value else NA_real_,
+      .groups = "drop"
+    ) %>%
+    mutate(normal = p.normality > 0.05 | is.na(p.normality))
+  
+  # Identify which parameters need non-parametric tests
+  non_normal_params <- normality %>%
+    group_by(Parameter) %>%
+    summarise(any_non_normal = any(!normal, na.rm = TRUE)) %>%
+    filter(any_non_normal) %>%
+    pull(Parameter)
+  
+  cat("\nParameters requiring non-parametric test:", 
+      length(non_normal_params), "of", length(param_names), "\n")
+  
+  # Parametric tests (t-test)
+  stat_test_t <- df_long %>%
+    filter(!Parameter %in% non_normal_params) %>%
+    group_by(Parameter) %>%
+    t_test(Value ~ ident) %>%
+    mutate(method = "t-test")
+  
+  # Non-parametric tests (Wilcoxon)
+  stat_test_w <- df_long %>%
+    filter(Parameter %in% non_normal_params) %>%
+    group_by(Parameter) %>%
+    wilcox_test(Value ~ ident) %>%
+    mutate(method = "Wilcoxon")
+  
+  # Combine results
+  stat_test_combined <- bind_rows(stat_test_t, stat_test_w)
+  
+  # Apply FDR correction (Benjamini-Hochberg)
+  stat_test_fdr <- stat_test_combined %>%
+    ungroup() %>%
+    mutate(p.adj.fdr = p.adjust(p, method = "BH")) %>%
+    mutate(p.adj.signif.fdr = case_when(
+      p.adj.fdr <= 0.001 ~ "***",
+      p.adj.fdr <= 0.01  ~ "**",
+      p.adj.fdr <= 0.05  ~ "*",
+      TRUE ~ "ns"
+    )) %>%
+    arrange(p.adj.fdr)
+  
+  # Also calculate Bonferroni for comparison
+  stat_test_fdr <- stat_test_fdr %>%
+    mutate(p.adj.bonf = p.adjust(p, method = "bonferroni")) %>%
+    mutate(p.adj.signif.bonf = case_when(
+      p.adj.bonf <= 0.001 ~ "***",
+      p.adj.bonf <= 0.01  ~ "**",
+      p.adj.bonf <= 0.05  ~ "*",
+      TRUE ~ "ns"
+    ))
+  
+  # --- STEP 3: EFFECT SIZES ---
+  effect_sizes <- df_long %>%
+    group_by(Parameter) %>%
+    cohens_d(Value ~ ident) %>%  # Removed pooled_sd argument
+    select(Parameter, effsize, magnitude)
+  
+  # Combine all results
+  final_results <- stat_test_fdr %>%
+    left_join(effect_sizes, by = "Parameter") %>%
+    select(Parameter, method, statistic, p, p.adj.fdr, p.adj.signif.fdr, 
+           p.adj.bonf, p.adj.signif.bonf, effsize, magnitude)
+  
+  cat("\n=== Results Summary ===\n")
+  print(final_results, n = 24)
+  
+  
+  # --- STEP 4: VISUALIZATION ---
+  # Create a function for plotting in the same style
+  plot_ephys_params <- function(df_long, final_results, parameters_to_plot) {
+    # Filter data to selected parameters
+    parameters_to_plot <- factor(parameters_to_plot, levels = parameters_to_plot, ordered = TRUE)
+    df_plot <- df_long %>%
+      filter(Parameter %in% parameters_to_plot) %>%
+      mutate(Parameter = factor(Parameter, levels = parameters_to_plot, ordered = TRUE))
+    
+    # Also ensure parameters_to_plot is a character vector for consistency
+    parameters_to_plot <- as.character(parameters_to_plot)
+    
+    # Calculate y positions for significance bars (only for parameters present in final_results)
+    y_positions <- df_plot %>%
+      group_by(Parameter) %>%
+      summarize(y.position = max(Value, na.rm = TRUE) + 0.15 * abs(max(Value, na.rm = TRUE)), .groups = "drop")
+    
+    # Prepare stat annotation subset to selected parameters
+    stat_anno <- final_results %>%
+      filter(Parameter %in% parameters_to_plot) %>%
+      left_join(y_positions, by = "Parameter") %>%
+      mutate(
+        group1 = "DCF+",
+        group2 = "WFA+",
+        label = p.adj.signif.fdr
+      )
+    
+    # Create plot 
+    p <- ggplot(df_plot, aes(x = ident, y = Value, color = ident)) +
+      coord_cartesian(clip = "off") +
+      geom_jitter(width = 0.1, size = 0.6, alpha = 1, na.rm = TRUE) +
+      geom_violin(width = 0.7, trim = TRUE, alpha = 0.25, linewidth = 0.3, na.rm = TRUE) +
+      geom_boxplot(width = 0.15, outlier.shape = NA, color = "black", alpha = 0.3, size = 0.3, na.rm = TRUE) +
+      stat_pvalue_manual(stat_anno, label = "label", tip.length = 0.01, size = 3, hide.ns = TRUE) +
+      scale_color_manual(values = my_colors) +
+      facet_wrap(~factor(Parameter, levels = parameters_to_plot), 
+                 scales = "free_y", ncol = 3, 
+                 labeller = as_labeller(param_dict), drop = FALSE, as.table = TRUE) +
+      labs(title = NULL, x = NULL, y = NULL) +
+      theme_classic(base_size = 14) +
+      theme(
+        panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 6),
+        axis.text.y = element_text(size = 6, color = "black"), 
+        axis.text = element_text(color = "black"),
+        axis.line = element_line(color = "black"),
+        strip.background = element_blank(),
+        strip.text = element_text(size = 8, face = "plain"),
+        legend.position = "none",
+        plot.margin = margin(t = 15, r = 5, b = 5, l = 5)
+      )
+    
+    return(p)
+  }
+  
+  # 1. Plot only significant parameters from MANOVA
+  sig_params <- final_results %>% filter(p.adj.fdr < 0.05) %>% pull(Parameter)
+  p_sig <- plot_ephys_params(df_long, final_results, sig_params)
+  print(p_sig)
+  
+  # 2. Plot selected, typical parameters regardless of significance
+  custom_params <- c(
+      "ap_width", "ap_upstroke", "fAHP_amp", "ap_thresh", 
+      "freq_max", "rheobase", "amp_adapt", "isi_adapt", 
+      "sag_ratio", "CC_Rm", "CC_tau", "RMP"
+      )
+  p_custom <- plot_ephys_params(df_long, final_results, custom_params)
+  print(p_custom)
+  save_fig(p_custom, "Fig_1C_Ephys_custom_parameters", w=280/96, h=540/96)
+  # Figure 1c, Version 27.11.2025: export @ Width 280 x Height 540
+  
+  # --- STEP 5: Supplementary Table of all 24 parameters --
+  # including: method of statistics, adj. p-value (FDR)
+  # descriptive statistics
+  
+  # descriptive stats per group & parameter using existing non_normal_params
+  # helper function
+  format_descr <- function(x, non_normal = FALSE) {
+    
+    if (!non_normal) {
+      m  <- mean(x, na.rm = TRUE)
+      sem <- sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x)))
+      return(sprintf("%.2f ± %.2f", m, sem))
+      
+    } else {
+      med <- median(x, na.rm = TRUE)
+      q1  <- quantile(x, 0.25, na.rm = TRUE)
+      q3  <- quantile(x, 0.75, na.rm = TRUE)
+      return(sprintf("%.2f (%.2f - %.2f)", med, q1, q3))
+    }
+  }
+  
+  table_descr <- df_long %>%
+    group_by(Parameter, ident) %>%
+    summarise(
+      descr = format_descr(
+        Value,
+        non_normal = unique(Parameter) %in% non_normal_params
+      ),
+      .groups = "drop"
+    ) %>%
+    tidyr::pivot_wider(
+      names_from = ident,
+      values_from = descr
+    ) %>%
+    arrange(Parameter)
+  
+  # Pairwise statistics table for supplement in paper
+  supp_table <- final_results %>%
+    left_join(table_descr, by = "Parameter") %>%
+    mutate(
+      Parameter = param_dict[Parameter],
+      `FDR p.adj` = scales::pvalue(p.adj.fdr),
+      Significance = p.adj.signif.fdr,
+      `Cohen's d` = round(effsize, 3)
+    ) %>%
+    select(Parameter, `DCF+`, `WFA+`, `Cohen's d`,method, `FDR p.adj`, Significance)
+
+  write_csv(supp_table, file.path(out_dir, "Table_S1_ephys_comparisons.csv"))
+} else {
+  cat("\n=== MANOVA is NOT significant (p >= 0.05) ===")
+  cat("\nNo evidence for overall multivariate difference between WFA+ and DCF+")
+  cat("\nUnivariate tests not recommended.\n")
+}
+```
+
+\large
+# 2: Assessing dimensionality of the parameter space
+\small
+## 2.1: PCA (Principal component analysis)
+1. PCA was performed on the z-scored dataset.
+2. Variance explained by each principal component was computed.
+3. The Kaiser criterion was applied (eigenvalues > 1).
+4. A cumulative scree plot was generated (**Fig. 2A**).
+5. Variable contributions to the first six principal components were visualized as bar plots (**Fig. S2B**).
+\tiny
+```{r}
+# ============================================================
+# PCA ANALYSIS
+# ============================================================
+
+# --- Run PCA (scaled variables) ---
+pca_results <- prcomp(df_dbl, scale. = TRUE)
+
+# Flip signs for interpretability consistency
+pca_results$rotation <- -1 * pca_results$rotation
+pca_results$x <- -1 * pca_results$x
+
+# --- Variance explained ---
+var_explained <- pca_results$sdev^2 / sum(pca_results$sdev^2)
+cum_var_explained <- cumsum(var_explained)
+
+scree <- data.frame(
+  PC = seq_along(var_explained),
+  Variance = var_explained,
+  CumulativeVariance = cum_var_explained
+)
+
+# --- Eigenvalues (Kaiser criterion) ---
+eigenvalues <- pca_results$sdev^2
+
+pca_df <- data.frame(
+  PC = seq_along(var_explained),
+  Variance = var_explained,
+  CumulativeVariance = cum_var_explained,
+  EigenValue = eigenvalues
+)
+
+kaiser_components <- eigenvalues[eigenvalues > 1]
+
+# ============================================================
+# Scree plot (cumulative variance)
+# ============================================================
+
+p_scree <- ggplot(scree, aes(x = PC, y = CumulativeVariance)) +
+  geom_col(fill = "grey70", width = 0.8) +
+  geom_hline(yintercept = 0.8,
+             linetype = "dashed",
+             linewidth = 0.3) +
+  scale_y_continuous(limits = c(0, 1),
+                     breaks = seq(0, 1, by = 0.2)) +
+  scale_x_continuous(limits = c(1, 20),
+                     breaks = seq(0, 20, by = 5)) +
+  labs(x = "Principal Component",
+       y = "Cumulative Variance Explained") +
+  theme_classic2() +
+  theme(
+    axis.text = element_text(size = 6, color = "black"),
+    axis.title = element_text(size = 8, color = "black"),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black")
+  )
+
+print(p_scree)
+
+save_fig(p_scree,
+         "Fig_2A_Cumulative_Scree_Plot",
+         w = 125/96,
+         h = 220/96)
+
+# ============================================================
+# PCA loadings / variable contributions
+# ============================================================
+
+library(FactoMineR)
+library(factoextra)
+library(gridExtra)
+
+# Contributions per variable
+var_contrib <- get_pca_var(pca_results)$contrib
+
+# --- Plot top contributors per PC ---
+plots <- list()
+
+for (i in 1:6) {
+
+  plots[[i]] <- fviz_contrib(
+    pca_results,
+    choice = "var",
+    axes = i,
+    top = 10
+  ) +
+    ggtitle(paste("PC", i)) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 8),
+      panel.grid = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(color = "black"),
+      axis.text = element_text(size = 6, color = "black"),
+      axis.title = element_text(size = 8, color = "black"),
+      axis.ticks = element_line(linewidth = 0.3)
+    )
+}
+
+# Arrange panels
+p_pca_loadings <- grid.arrange(grobs = plots, nrow = 2, ncol = 3)
+
+# Save figure
+ggsave(
+  filename = file.path(out_dir, "Suppl_Fig_2B_PCA_loadings.eps"),
+  plot = p_pca_loadings,
+  width = 500/96,
+  height = 350/96,
+  units = "in",
+  device = "eps"
+)
+
+# ============================================================
+# Export PCA summary table
+# ============================================================
+
+write_csv(
+  pca_df,
+  file.path(out_dir, "Suppl_Fig_2A_PCA_results.csv")
+)
+```
+
+\small
+## 2.2 Linear Discriminant Analysis (LDA): DCF vs. WFA
+- Linear discriminant analysis (LDA) was performed to evaluate separability between WFA+ and DCF+ cells based on electrophysiological parameters.
+- All parameters were z-scored prior to analysis to ensure comparability across features.
+- An LDA model was fitted using group identity as the response variable.
+- Classification performance was assessed using the confusion matrix.
+- Accuracy, sensitivity, and positive predictive values were computed for both groups.
+- Model generalization performance was evaluated using leave-one-out cross-validation.
+- The first linear discriminant (LD1) was used for visualization of group separation.
+- LDA coefficients were extracted to identify parameters contributing most strongly to group discrimination.
+- Results were visualized as LD1 density plots and coefficient bar plots (**Fig. S1A–B**).
+
+```{r} 
+# ========================================================================
+# Linear Discriminant Analysis (WFA+ vs DCF+)
+# ========================================================================
+
+library(MASS)
+
+# --- Prepare dataset -----------------------------------------------------
+# Input: df_int (24 electrophysiological parameters + metadata)
+
+df_lda <- df_int[, !(names(df_int) %in% c("cell", "put_type"))]
+df_lda$ident <- as.factor(df_lda$ident)
+
+# --- Standardization -----------------------------------------------------
+# Z-score scaling ensures comparability across features
+
+params_lda <- df_lda[, setdiff(names(df_lda), "ident")]
+params_scaled <- scale(params_lda)
+
+df_lda_scaled <- data.frame(params_scaled, group = df_lda$ident)
+
+# --- Fit LDA model -------------------------------------------------------
+lda_fit <- lda(group ~ ., data = df_lda_scaled)
+
+# Predict class membership and LD scores
+lda_pred <- predict(lda_fit)
+
+# LD1 scores for visualization
+df_lda_scaled$LD1 <- lda_pred$x[, 1]
+
+# ========================================================================
+# CLASSIFICATION PERFORMANCE
+# ========================================================================
+
+predicted_classes <- lda_pred$class
+actual_classes <- df_lda_scaled$group
+
+# Confusion matrix
+conf_matrix <- table(Actual = actual_classes, Predicted = predicted_classes)
+print(conf_matrix)
+
+# Accuracy
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+
+# Group-wise sensitivity
+sensitivity_dcf <- conf_matrix[1,1] / sum(conf_matrix[1,])
+sensitivity_wfa <- conf_matrix[2,2] / sum(conf_matrix[2,])
+
+# Positive predictive values
+ppv_dcf <- conf_matrix[1,1] / sum(conf_matrix[,1])
+ppv_wfa <- conf_matrix[2,2] / sum(conf_matrix[,2])
+
+cat("\n=== LDA Classification Performance ===\n")
+cat("Accuracy:", round(accuracy * 100, 1), "%\n")
+cat("DCF+ Sensitivity:", round(sensitivity_dcf * 100, 1), "%\n")
+cat("WFA+ Sensitivity:", round(sensitivity_wfa * 100, 1), "%\n")
+cat("DCF+ PPV:", round(ppv_dcf * 100, 1), "%\n")
+cat("WFA+ PPV:", round(ppv_wfa * 100, 1), "%\n")
+
+# ========================================================================
+# CROSS-VALIDATION (leave-one-out)
+# ========================================================================
+
+lda_cv <- lda(group ~ ., data = df_lda_scaled, CV = TRUE)
+cv_accuracy <- mean(lda_cv$class == df_lda_scaled$group)
+
+cat("LOOCV Accuracy:", round(cv_accuracy * 100, 1), "%\n")
+
+# ========================================================================
+# VISUALIZATION: LD1 DISTRIBUTION
+# ========================================================================
+
+p_lda_density <- ggplot(df_lda_scaled, aes(x = LD1, fill = group)) +
+  geom_density(alpha = 0.6, color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = my_colors, labels = c("DCF+", "WFA+")) +
+  scale_x_continuous(expand = c(0.01, 0.01)) +
+  scale_y_continuous(expand = c(0.01, 0.01)) +
+  labs(title = "LDA Projection", x = "LD1 Score", y = "Density") +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 8),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 6),
+    axis.line = element_line(color = "black", linewidth = 0.3),
+    axis.ticks = element_line(color = "black", linewidth = 0.3),
+    axis.text = element_text(color = "black", size = 6),
+    axis.title = element_text(size = 6),
+    panel.grid = element_blank()
+  )
+
+print(p_lda_density)
+save_fig(p_lda_density,
+         "Suppl_Fig_1A_LDA_Projection_DCFvsWFA",
+         w = 220/96, h = 250/96,
+         device = "pdf") # EPS cannot display transparency
+
+# ========================================================================
+# LDA COEFFICIENTS (feature importance)
+# ========================================================================
+
+coef_df <- data.frame(
+  Parameter = rownames(lda_fit$scaling),
+  Coefficient = lda_fit$scaling[, 1]
+) %>%
+  mutate(Parameter_label = param_dict[Parameter]) %>%
+  arrange(desc(abs(Coefficient)))
+
+p_coef <- ggplot(coef_df,
+                 aes(x = reorder(Parameter_label, abs(Coefficient)),
+                     y = Coefficient)) +
+  geom_col(color = "black", fill = "white", width = 0.7) +
+  coord_flip() +
+  labs(title = "LDA Coefficients (LD1)",
+       x = "Parameter", y = "Coefficient") +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 8),
+    axis.title = element_text(size = 6),
+    axis.line = element_line(color = "black", linewidth = 0.3),
+    axis.ticks = element_line(color = "black", linewidth = 0.3),
+    axis.text = element_text(size = 6, color = "black"),
+    panel.grid = element_blank(),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.2),
+    legend.position = "none"
+  )
+
+print(p_coef)
+save_fig(p_coef,
+         "Suppl_Fig_1B_LDA_Coefficients",
+         w = 350/96, h = 280/96)
+```
+
+\large
+# 3.: Clustering, using different methods.
+- 3.1 Unsupervised hierarchircal clustering
+- 3.2 Leave-one out Cross validation
+- 3.3 LDA of cluster 1 vs cluster 3, plotting the 10 most important discriminators
+- 3.2 Stacked plots DCF vs WFA per Cluster
+- 3.3 Chi-Square test DCF vs WFA -> sampling per Cluster
+- 3.4 LDA Cluster 1 vs. Cluster 3? -> biologically relevant?
+\small
+## 3.1: Hierarchical clustering
+- Unsupervised hierarchical clustering was performed to identify structure in the electrophysiological parameter space.
+- Pairwise distances were computed using Manhattan distance, and hierarchical clustering was performed using Ward’s linkage (Ward.D2).
+- Cluster stability and optimal cluster number were assessed using silhouette analysis (k = 2–6).
+- Dendrograms were generated for 2- and 3-cluster solutions and visualized with cluster-specific color coding (**Fig. 2B**).
+- A parameter-by-cell heatmap was generated using z-scored electrophysiological features ordered by hierarchical clustering.
+- Parameters were additionally reordered according to a biologically informed sequence for interpretability.
+- Results of silhouette analysis were reported in **Fig. S2C**.
+```{r}
+# ========================================================================
+# Hierarchical clustering
+# ========================================================================
+
+library(cluster)
+library(dendextend)
+library(pheatmap)
+library(scico)
+library(scales)
+library(grid)
+
+# --- Standardization -----------------------------------------------------
+df_scale <- scale(df_dbl)
+
+# --- Distance matrix -----------------------------------------------------
+# Manhattan distance for robustness to outliers
+d <- dist(df_scale, method = "manhattan")
+
+# Hierarchical clustering (Ward linkage)
+hc <- hclust(d, method = "ward.D2")
+
+# ========================================================================
+# SILHOUETTE ANALYSIS (k = 2–6)
+# ========================================================================
+
+sil_scores <- data.frame(k = 2:6, avg_silhouette = NA)
+
+for (k in 2:6) {
+
+  clust_level <- cutree(hc, k = k)
+  sil <- silhouette(clust_level, d)
+
+  sil_scores$avg_silhouette[k - 1] <- mean(sil[, 3])
+
+  # --- plot (interactive view) ---
+  plot(sil,
+       main = paste0("Silhouette Plot – ", k, " Clusters"),
+       border = NA)
+
+  # --- export ---
+  png(
+    file.path(out_dir,
+              paste0("Suppl_Fig_2C_Silhouette_", k, "_clusters.png")),
+    width = 800,
+    height = 600,
+    res = 150
+  )
+
+  plot(sil,
+       main = paste0("Silhouette Plot – ", k, " Clusters"),
+       border = NA)
+
+  dev.off()
+}
+
+print(sil_scores)
+write_csv(sil_scores,
+           file.path(out_dir, "silhouette_scores.csv"))
+
+# ========================================================================
+# DENDROGRAM VISUALIZATION
+# ========================================================================
+
+hclust_level <- cutree(hc, k = 3)
+
+dend <- as.dendrogram(hc)
+
+# Cluster color mapping (3-cluster solution)
+cluster_cols_3 <- unname(my_colors[c("2", "1", "3")])
+
+dend_colored <- color_branches(dend, k = 3, col = cluster_cols_3)
+dend_colored <- set(dend_colored, "labels", NULL)
+
+plot(dend_colored)
+
+pdf(file.path(out_dir, "Fig_2B_Cluster_Dendrogram_B.pdf"),
+    width = 430/96,
+    height = 240/96)
+
+plot(dend_colored, cex = 0.5)
+
+dev.off()
+
+# # Color the branches based on 2 clusters
+# hclust_level <- cutree (hc, k=2)
+# dend <- as.dendrogram(hc)
+# cluster_cols_2 <- unname(my_colors[c("2", "1")])
+# dend_colored <- color_branches(dend, k = 2, col=cluster_cols_2)
+# dend_colored <- set(dend_colored, "labels", NULL)
+# plot(dend_colored)
+# hclust_level <- cutree (hc, k=3)
+
+# ========================================================================
+# HEATMAP: PARAMETERS × CELLS
+# ========================================================================
+
+# --- parameter order (biological interpretability) ----------------------
+custom_order <- c(
+  "ap_amp", "ap_width", "ap_rise", "ap_decay",
+  "ap_upstroke", "ap_downstroke", "ap_UDR",
+  "fAHP_amp", "fAHP_time", "ap_thresh",
+  "freq_max", "f_i_slope", "rheobase", "onset_lat",
+  "isi_first", "isi_avg", "isi_cv", "isi_adapt",
+  "amp_cv", "amp_adapt",
+  "RMP", "CC_tau", "CC_Rm", "sag_ratio"
+)
+
+# --- transpose for heatmap (features × cells) --------------------------
+mat_heat <- t(df_scale)
+
+# --- rescale each feature to [0,1] for visualization -------------------
+mat_heat_scaled <- t(apply(mat_heat, 1, function(x) rescale(x, to = c(0, 1))))
+
+# --- clustering of columns (cells) --------------------------------------
+row_dist <- dist(mat_heat)
+row_clust <- hclust(row_dist)
+
+# reorder rows by biological sequence
+mat_heat_scaled_ordered <- mat_heat_scaled[custom_order, ]
+
+# --- color palette ------------------------------------------------------
+color_palette <- scico(n = 100, palette = "vik")
+
+# --- heatmap ------------------------------------------------------------
+heat_grob <- pheatmap(
+  mat_heat_scaled_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = hc,
+  treeheight_col = 0,
+  treeheight_row = 0,
+  show_colnames = FALSE,
+  show_rownames = TRUE,
+  fontsize_row = 6,
+  color = color_palette,
+  border_color = NA
+)
+
+save_fig(heat_grob,
+         "Fig_2B_Heatmap",
+         w = 402.2/96,
+         h = 180/96)
+```
+
+\small
+## 3.2: Cluster validation: Leave-one-trial-out cluster validation (LOOCV)
+1. Used for results text, output: Table 3 (**Fig. S3B**)
+\tiny
+```{r}
+library(cluster)
+library(dplyr)
+
+# =========================
+# LOOCV Cluster Validation
+# =========================
+
+k <- 3  # number of clusters from main analysis
+
+# Original cluster assignment (reference solution)
+original_clusters <- cutree(hc, k = k)
+
+n <- nrow(df_scale)
+loo_assignments <- vector("integer", n)
+
+for (i in 1:n) {
+
+  # -------------------------
+  # 1. Leave-one-out sample
+  # -------------------------
+  train_data <- df_scale[-i, ]
+
+  # -------------------------
+  # 2. Recompute clustering
+  # -------------------------
+  d_train <- dist(train_data, method = "manhattan")
+  hc_train <- hclust(d_train, method = "ward.D2")
+  train_clusters <- cutree(hc_train, k = k)
+
+  # -------------------------
+  # 3. Assign left-out sample
+  # -------------------------
+  left_out_cell <- df_scale[i, , drop = FALSE]
+  d_to_train <- apply(train_data, 1, function(x) sum(abs(x - left_out_cell)))
+  nearest_neighbor <- which.min(d_to_train)
+
+  loo_assignments[i] <- train_clusters[nearest_neighbor]
+}
+
+# =========================
+# Evaluation
+# =========================
+
+# Agreement vector
+loo_agreement <- loo_assignments == original_clusters
+cat("LOOCV cluster assignment accuracy:", mean(loo_agreement), "\n")
+
+# Confusion matrix
+loo_table <- table(
+  Original = original_clusters,
+  LOOCV = loo_assignments
+)
+
+print(loo_table)
+
+# Overall stability
+loo_accuracy <- sum(diag(loo_table)) / sum(loo_table)
+cat("LOOCV Stability:", round(loo_accuracy * 100, 1), "%\n")
+
+# Cluster-wise stability
+stability <- diag(loo_table) / rowSums(loo_table) * 100
+print(round(stability, 1))
+
+# =========================
+# Export
+# =========================
+
+loo_results <- data.frame(
+  Cluster = paste("Cluster", 1:3),
+  Size = as.numeric(table(original_clusters)),
+  Stability_pct = round(stability, 1),
+  LOOCV_accuracy = round(loo_accuracy * 100, 1)
+)
+
+write_csv(loo_results,
+          file.path(out_dir, "Suppl_Fig_2C_LOOCV_cluster_stability.csv"))
+
+print(loo_results)
+```
+
+\small
+## 3.3: LDA of cluster 1 (classical FSI) vs. cluster 3 (borderline-FSI)
+1. Assign hierarchical cluster labels (k = 3 solution) to df_int.
+2. Subset dataset to Cluster 1 and Cluster 3 only.
+3. Select all electrophysiological parameters and standardize variables for LDA input.
+4. Fit an LDA model to classify Cluster 1 vs Cluster 3 based on electrophysiological features.
+5. Evaluate classification performance using confusion matrix and overall accuracy.
+6. Extract LDA coefficients to identify the most discriminative parameters and export results as CSV.
+7. Visualize group separation along LD1 using density plots.
+8. Select the top 10 discriminative parameters based on absolute LDA coefficients and reshape data into long format.
+9. Visualize raw distributions of the top 10 parameters using violin plots, boxplots, and jittered data points, stratified by cluster.
+```{r}
+library(MASS)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# =========================
+# 1. Cluster assignment
+# =========================
+
+df_int$hclust <- factor(cutree(hc, k = 3))
+
+df_int <- df_int %>%
+  mutate(
+    cluster_label = recode(
+      as.character(hclust),
+      "1" = "classical FSI",
+      "2" = "non-FSI",
+      "3" = "borderline-FSI"
+    ),
+    cluster_label = factor(
+      cluster_label,
+      levels = c("classical FSI", "borderline-FSI", "non-FSI")
+    )
+  )
+
+# =========================
+# 2. Subset: clusters 1 vs 3
+# =========================
+
+df_clusters13 <- df_int %>%
+  filter(hclust %in% c("1", "3"))
+
+numeric_cols <- names(df_dbl)
+
+df_c13_numeric <- df_clusters13[, c(numeric_cols, "hclust")]
+df_c13_numeric$hclust <- factor(df_c13_numeric$hclust)
+
+# =========================
+# 3. Scaling + LDA
+# =========================
+
+df_c13_scaled <- data.frame(
+  scale(df_c13_numeric[, numeric_cols]),
+  hclust = df_c13_numeric$hclust
+)
+
+df_c13_scaled$hclust <- factor(df_c13_scaled$hclust, levels = c("1", "3"))
+
+lda_c13_fit <- lda(hclust ~ ., data = df_c13_scaled)
+lda_c13_pred <- predict(lda_c13_fit)
+
+# =========================
+# 4. Classification performance
+# =========================
+
+c13_conf_matrix <- table(
+  Actual = df_c13_scaled$hclust,
+  Predicted = lda_c13_pred$class
+)
+
+c13_accuracy <- sum(diag(c13_conf_matrix)) / sum(c13_conf_matrix)
+
+print(c13_conf_matrix)
+cat("Clusters 1 vs 3 LDA Accuracy:", round(c13_accuracy * 100, 1), "%\n")
+
+# =========================
+# 5. LDA coefficients
+# =========================
+
+lda_coef <- lda_c13_fit$scaling[, 1]
+
+coef_df_c13 <- data.frame(
+  Parameter = param_dict[names(lda_coef)],
+  Coefficient = lda_coef
+) %>%
+  arrange(desc(abs(Coefficient)))
+
+write_csv(
+  coef_df_c13,
+  file.path(out_dir, "Suppl_Fig_2F_LDA_clusters13_coefficients.csv")
+)
+
+# =========================
+# 6. LD1 density plot
+# =========================
+
+df_c13_scaled$LD1 <- lda_c13_pred$x[, 1]
+
+p_lda_c13 <- ggplot(df_c13_scaled, aes(x = LD1, fill = hclust)) +
+  geom_density(alpha = 0.6, color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = my_colors[c("1", "3")]) +
+  labs(x = "LD1 Score", y = "Density") +
+  theme_classic2() +
+  theme(
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    legend.position = "bottom"
+  )
+
+print(p_lda_c13)
+save_fig(p_lda_c13, "Suppl_Fig_2E_LDA_Cluster", w = 2, h = 1.4, dev = "pdf")
+
+# =========================
+# 7. Top 10 discriminators
+# =========================
+
+top10_coef <- head(coef_df_c13, 10)
+
+p_top10 <- ggplot(top10_coef,
+                  aes(x = reorder(Parameter, abs(Coefficient)),
+                      y = Coefficient)) +
+  geom_col(fill = "white", color = "black") +
+  coord_flip() +
+  labs(x = "Top 10 discriminating parameters", y = "LD1 coefficient") +
+  theme_classic(base_size = 12)
+
+print(p_top10)
+
+ggsave(
+  file.path(out_dir, "Suppl_Fig_2F_Clusters13_LDA_top10.pdf"),
+  width = 2.6, height = 1.7
+)
+
+# =========================
+# 8. Raw distributions of top 10
+# =========================
+
+top10_raw_names <- names(lda_coef)[order(abs(lda_coef), decreasing = TRUE)[1:10]]
+
+df_c13_long <- df_clusters13 %>%
+  pivot_longer(cols = all_of(top10_raw_names),
+               names_to = "Parameter",
+               values_to = "Value") %>%
+  mutate(
+    hclust = factor(hclust),
+    Parameter = factor(Parameter, levels = top10_raw_names)
+  )
+
+levels(df_c13_long$Parameter) <- param_dict_safe[top10_raw_names]
+
+p_raw_top10 <- ggplot(df_c13_long,
+                      aes(x = hclust, y = Value, fill = hclust)) +
+  geom_violin(alpha = 0.25, linewidth = 0.2) +
+  geom_boxplot(width = 0.15, alpha = 0.4, linewidth = 0.2) +
+  facet_wrap(~Parameter, scales = "free_y", ncol = 3) +
+  scale_fill_manual(values = my_colors[c("1", "3")]) +
+  theme_classic2() +
+  theme(
+    axis.text.x = element_blank(),
+    strip.text = element_text(size = 6)
+  )
+
+print(p_raw_top10)
+
+save_fig(
+  p_raw_top10,
+  "Suppl_Fig_2G_Clusters_Raw_Top10",
+  w = 3.3, h = 3.0, dev = "pdf"
+)
+```
+
+\small
+## 3.4: Composition of hierarchical clusters across identification groups (DCF+ vs WFA+)
+- Visualization of cluster distribution across in situ identification groups
+1. Compute proportional distribution of hierarchical clusters within each identification group.
+2. Generate stacked bar plot showing relative cluster composition for DCF+ vs WFA+.
+3. Visualize cluster proportions using normalized counts (position = "fill").
+4. Export figure (**Fig. 2B**) for publication.
+\tiny
+```{r}
+
+# =========================
+# Ensure factor structure
+# =========================
+
+df_int$ident <- as.factor(df_int$ident)
+df_int$hclust <- as.factor(df_int$hclust)
+df_int$cluster_label <- as.factor(df_int$cluster_label)
+
+# =========================
+# Stacked bar plot
+# =========================
+
+fig_2bar <- ggplot(df_int, aes(x = ident, fill = cluster_label)) +
+  geom_bar(position = "fill", width = 0.8) +  # relative proportions
+
+  scale_fill_manual(
+    values = my_colors,
+    guide = guide_legend(
+      override.aes = list(size = 1)  # smaller legend symbols
+    )
+  ) +
+
+  labs(
+    x = "In situ identification",
+    y = "Relative count",
+    fill = "Cluster"
+  ) +
+
+  theme_classic() +
+  theme(
+    axis.text.x  = element_text(size = 6),
+    axis.text.y  = element_text(size = 6),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    legend.text  = element_text(size = 6)
+  )
+
+print(fig_2bar)
+
+save_fig(
+  fig_2bar,
+  "Fig_2B_Stacked_Bar",
+  w = 210 / 96,
+  h = 220 / 96,
+  device = "eps"
+)
+```
+
+\small
+## 3.5: Cluster–Group Association (Chi-square / Fisher’s Exact Test)
+- Statistical test of association between identification group and cluster assignment (reported in Results; no figure).
+\tiny
+```{r}
+# =========================
+# Cluster–Identification Association
+# Chi-square + Fisher’s Exact Test
+# =========================
+
+library(dplyr)
+library(tidyr)
+
+# -------------------------
+# 1. Count observations
+# -------------------------
+
+counts <- df_int %>%
+  group_by(ident, cluster_label) %>%
+  summarise(n = n(), .groups = "drop")
+
+# -------------------------
+# 2. Build contingency table
+# -------------------------
+
+contingency_tbl <- counts %>%
+  pivot_wider(
+    names_from = cluster_label,
+    values_from = n,
+    values_fill = 0
+  )
+
+print("Contingency table")
+print(contingency_tbl)
+
+# Convert to matrix format
+fisher_matrix <- as.matrix(contingency_tbl[, -1])
+rownames(fisher_matrix) <- contingency_tbl$ident
+
+# -------------------------
+# 3. Fisher's Exact Test
+# -------------------------
+fisher_res <- fisher.test(fisher_matrix)
+print(fisher_res)
+
+# -------------------------
+# 4. Chi-square test (for comparison only)
+# -------------------------
+
+chi_matrix <- fisher_matrix
+
+chi_result <- chisq.test(chi_matrix)
+
+print("Chi-square test (note: assumptions may be violated for small counts)")
+print(chi_result)
+
+# Expected counts (optional inspection)
+# chi_result$expected
+```
+
+\large
+# 4. Uniform Manifold Approximation and Projection (UMAP) of electrophysiological data
+\small
+1. Compute UMAP embedding from standardized electrophysiological parameter space
+2. Add UMAP coordinates to dataframe
+3. Merge cluster assignments (hierarchical clustering) and identification labels (DCF+/WFA+)
+4. Visualize UMAP embedding using cluster identity as color and experimental identification as shape
+5. (Optional) alternative UMAP visualizations are commented out for exploratory analysis
+
+## 4.1 UMAP with clusters as color code and identification method as shape
+- **Fig. 2C**
+```{r}
+# =========================
+# UMAP: parameter space embedding
+# =========================
+
+set.seed(1234)
+
+# Scale parameter matrix
+df_scale <- scale(df_dbl)
+
+# Compute UMAP embedding
+umap_fit <- umap(
+  df_scale,
+  n_neighbors = 50,
+  spread = 0.1,
+  min_dist = 0.05
+)
+
+# =========================
+# Build UMAP dataframe
+# =========================
+
+umap_df <- umap_fit$layout %>%
+  as.data.frame() %>%
+  rename(
+    UMAP1 = V1,
+    UMAP2 = V2
+  ) %>%
+  mutate(cell = pull(cells, cell)) %>%
+  inner_join(df_meta, by = "cell")
+
+# Add clustering information
+umap_df <- umap_df %>%
+  left_join(
+    df_int %>% dplyr::select(cell, hclust, cluster_label),
+    by = "cell"
+  )
+
+# =========================
+# Main UMAP plot (Fig. 2C)
+# =========================
+
+fig_2UMAP <- ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = cluster_label, shape = ident)) +
+  geom_point(size = 1.5) +
+  scale_color_manual(values = my_colors) +
+  scale_shape_manual(values = c("DCF+" = 16, "WFA+" = 1)) +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    color = "Cluster",
+    shape = "Identification"
+  ) +
+  theme_classic2() +
+  theme(
+    axis.text.x = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    legend.text  = element_text(size = 6)
+  )
+
+print(fig_2UMAP)
+
+save_fig(
+  fig_2UMAP,
+  "Fig_2C_UMAP",
+  w = 390/96,
+  h = 290/96,
+  device = "eps"
+)
+
+# =========================
+# Alternative / exploratory UMAP plots (commented)
+# =========================
+
+# umap_df %>%
+#   ggplot(aes(x = UMAP1, y = UMAP2, color = ident, shape = put_type)) +
+#   geom_point(size = 2) +
+#   scale_color_manual(values = my_colors) +
+#   scale_fill_manual(values = my_colors) +
+#   theme_classic()
+
+# umap_df %>%
+#   ggplot(aes(x = UMAP1, y = UMAP2, color = hclust, shape = put_type)) +
+#   geom_point(size = 2) +
+#   scale_color_manual(values = my_colors) +
+#   scale_shape_manual(values = c("PC" = 17, "FSIN" = 16, "Non-FSIN" = 1)) +
+#   theme_classic2()
+
+# x_range <- range(umap_df$UMAP1)
+# y_range <- range(umap_df$UMAP2)
+
+# umap_df %>%
+#   ggplot(aes(x = UMAP1, y = UMAP2, color = hclust)) +
+#   geom_point(size = 2) +
+#   scale_color_manual(values = my_colors) +
+#   theme_classic2() +
+#   xlim(x_range) +
+#   ylim(y_range) +
+#   labs(title = "UMAP of All Groups")
+
+# umap_df_dcf <- umap_df[umap_df$ident == "DCF+", ]
+
+# umap_df_dcf %>%
+#   ggplot(aes(x = UMAP1, y = UMAP2, color = hclust)) +
+#   geom_point(size = 2) +
+#   scale_color_manual(values = my_colors) +
+#   theme_classic2() +
+#   xlim(x_range) +
+#   ylim(y_range) +
+#   labs(title = "UMAP of DCF+ Group Only")
+
+# umap_df_wfa <- umap_df[umap_df$ident == "WFA+", ]
+
+# umap_df_wfa %>%
+#   ggplot(aes(x = UMAP1, y = UMAP2, color = hclust)) +
+#   geom_point(size = 2) +
+#   scale_color_manual(values = my_colors) +
+#   theme_classic2() +
+#   xlim(x_range) +
+#   ylim(y_range) +
+#   labs(title = "UMAP of WFA+ Group Only")
+```
+
+\large 
+## 4.2: UMAP exploration - Functional gradients per parameter over UMAP space
+- Visualization of electrophysiological parameter distributions across the UMAP embedding
+- Each panel shows one parameter as a continuous gradient over UMAP space
+- **Fig. 2D**
+\tiny
+```{r, fig.width = 4, fig.height = 3}
+# =========================
+# Merge UMAP with electrophysiological parameters
+# =========================
+
+umap_params <- left_join(
+  umap_df,
+  df_original[, c(
+    "cell",
+    "VC_Rs", "RMP", "CC_tau", "CC_Rm", "sag_ratio", "rheobase",
+    "freq_max", "f_i_slope", "onset_lat",
+    "isi_first", "isi_avg", "isi_cv", "isi_adapt",
+    "amp_cv", "amp_adapt", "burst",
+    "ap_amp", "ap_thresh", "ap_width", "ap_rise", "ap_decay",
+    "ap_upstroke", "ap_downstroke", "ap_UDR",
+    "fAHP_amp", "fAHP_time"
+  )],
+  by = "cell"
+)
+
+# =========================
+# Parameter sets
+# =========================
+
+umap_custom <- c(
+  "ap_width", "ap_upstroke", "fAHP_amp",
+  "ap_thresh", "freq_max", "rheobase",
+  "amp_adapt", "isi_adapt", "sag_ratio",
+  "CC_Rm", "CC_tau", "RMP"
+)
+
+umap_full <- c(
+  "RMP", "CC_tau", "CC_Rm", "sag_ratio", "rheobase",
+  "freq_max", "f_i_slope", "onset_lat",
+  "isi_first", "isi_avg", "isi_cv", "isi_adapt",
+  "amp_cv", "amp_adapt",
+  "ap_amp", "ap_thresh", "ap_width", "ap_rise", "ap_decay",
+  "ap_upstroke", "ap_downstroke", "ap_UDR",
+  "fAHP_amp", "fAHP_time"
+)
+
+# =========================
+# Long-format transformation
+# =========================
+
+umap_long <- umap_params %>%
+  pivot_longer(
+    cols = umap_custom,
+    names_to = "parameter",
+    values_to = "value"
+  ) %>%
+  group_by(parameter) %>%
+  mutate(
+    scaled_value = scales::rescale(abs(value))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    parameter = factor(parameter, levels = umap_custom)
+  )
+
+# =========================
+# UMAP gradient plot (Fig. 2D)
+# =========================
+
+fig_2gradient <- ggplot(umap_long, aes(x = UMAP1, y = UMAP2, color = scaled_value)) +
+  geom_point(size = 0.8) +
+  scale_color_scico(palette = "lajolla") +
+  facet_wrap(
+    ~parameter,
+    scales = "free",
+    ncol = 3,
+    labeller = as_labeller(param_dict)
+  ) +
+  labs(
+    title = NULL,
+    color = "Scaled Value"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 6)
+  ) +
+  guides(
+    color = guide_colorbar(
+      barwidth = 0.5,
+      barheight = 4
+    )
+  )
+
+print(fig_2gradient)
+
+save_fig(
+  fig_2gradient,
+  "Fig_2D_UMAP_gradients",
+  w = 410/96,
+  h = 500/96,
+  device = "eps"
+)
+```
+
+\large
+# 5 Further exploration of data of single patients
+- Map metadata on UMAP
+- **Figure S3**
+```{r}
+library(patchwork)
+
+# =========================
+# Helper: common ggplot theme (kept inline for consistency)
+# =========================
+
+base_umap_theme <- theme_classic2() +
+  theme(
+    plot.title = element_text(size = 8, hjust = 0.5),
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.line = element_line(linewidth = 0.3),
+    axis.ticks = element_line(linewidth = 0.3),
+    legend.position = "none"
+  )
+
+facet_umap_theme <- theme_classic2() +
+  theme(
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.line = element_line(linewidth = 0.3),
+    axis.ticks = element_line(linewidth = 0.3),
+    legend.position = "none",
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 6),
+    strip.text = element_blank(),
+    strip.background = element_blank()
+  )
+
+# =========================
+# Patient
+# =========================
+
+umap_df$pat <- as.factor(umap_df$pat)
+
+umap_pat <- ggplot(umap_df, aes(UMAP1, UMAP2, color = pat)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  labs(title = "UMAP colored by Patient", color = "Patient") +
+  base_umap_theme
+
+umap_pat_facet <- ggplot(umap_df, aes(UMAP1, UMAP2, color = pat)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  facet_wrap(~pat, ncol = 6) +
+  labs(title = NULL, color = "Patient") +
+  facet_umap_theme
+
+fig_umap_pat <- (umap_pat | umap_pat_facet) +
+  plot_layout(widths = c(4, 6), axes = "collect_x", axis_titles = "collect_x")
+
+print(fig_umap_pat)
+save_fig(fig_umap_pat, "Suppl_Fig_3A_pat", w = 550/96, h = 200/96, device = "pdf")
+
+# =========================
+# Sex
+# =========================
+
+umap_df$sex <- as.factor(umap_df$sex)
+
+umap_sex <- ggplot(umap_df, aes(UMAP1, UMAP2, color = sex)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  labs(title = "UMAP colored by patient sex", color = "Sex") +
+  base_umap_theme
+
+umap_sex_facet <- ggplot(umap_df, aes(UMAP1, UMAP2, color = sex)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  facet_wrap(~sex) +
+  labs(title = NULL, color = "Sex") +
+  facet_umap_theme
+
+fig_umap_sex <- (umap_sex | umap_sex_facet) +
+  plot_layout(widths = c(4, 6), axes = "collect_x", axis_titles = "collect_x")
+
+print(fig_umap_sex)
+save_fig(fig_umap_sex, "Suppl_Fig_3B_sex", w = 550/96, h = 200/96, device = "pdf")
+
+# =========================
+# Clinic
+# =========================
+
+umap_df$clinic <- as.factor(umap_df$clinic)
+
+umap_clin <- ggplot(umap_df, aes(UMAP1, UMAP2, color = clinic)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  labs(title = "UMAP colored by location of clinic", color = "Clinic") +
+  base_umap_theme
+
+umap_clin_facet <- ggplot(umap_df, aes(UMAP1, UMAP2, color = clinic)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  facet_wrap(~clinic) +
+  labs(title = NULL, color = "Clinic") +
+  facet_umap_theme
+
+fig_umap_clin <- (umap_clin | umap_clin_facet) +
+  plot_layout(widths = c(4, 6), axes = "collect_x", axis_titles = "collect_x")
+
+print(fig_umap_clin)
+save_fig(fig_umap_clin, "Suppl_Fig_3C_clin", w = 550/96, h = 200/96, device = "pdf")
+
+# =========================
+# Area
+# =========================
+
+umap_df$area <- as.factor(umap_df$area)
+
+umap_area <- ggplot(umap_df, aes(UMAP1, UMAP2, color = area)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  labs(title = "UMAP colored by resection area", color = "Resection area") +
+  base_umap_theme
+
+umap_area_facet <- ggplot(umap_df, aes(UMAP1, UMAP2, color = area)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  facet_wrap(~area) +
+  labs(title = NULL, color = "Area") +
+  facet_umap_theme
+
+fig_umap_area <- (umap_area | umap_area_facet) +
+  plot_layout(widths = c(4, 6), axes = "collect_x", axis_titles = "collect_x")
+
+print(fig_umap_area)
+save_fig(fig_umap_area, "Suppl_Fig_3D_area", w = 550/96, h = 200/96, device = "pdf")
+
+# =========================
+# Pathology
+# =========================
+
+umap_df$patho <- as.factor(umap_df$patho)
+
+umap_patho <- ggplot(umap_df, aes(UMAP1, UMAP2, color = patho)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  labs(title = "UMAP colored by operation type ('patho')", color = "Pathology") +
+  base_umap_theme
+
+umap_patho_facet <- ggplot(umap_df, aes(UMAP1, UMAP2, color = patho)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  facet_wrap(~patho) +
+  labs(title = NULL, color = "Pathology") +
+  facet_umap_theme
+
+fig_umap_patho <- (umap_patho | umap_patho_facet) +
+  plot_layout(widths = c(4, 6), axes = "collect_x", axis_titles = "collect_x")
+
+print(fig_umap_patho)
+save_fig(fig_umap_patho, "Suppl_Fig_3D_patho", w = 550/96, h = 200/96, device = "pdf")
+
+# =========================
+# Age
+# =========================
+
+umap_age <- ggplot(umap_df, aes(UMAP1, UMAP2, color = age)) +
+  geom_point(size = 0.6) +
+  scale_color_viridis_c(option = "D") +
+  labs(title = "UMAP colored by age", color = "Age") +
+  base_umap_theme +
+  theme(
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 6)
+  )
+
+print(umap_age)
+save_fig(umap_age, "Suppl_Fig_3E_age", w = 290/96, h = 185/96, device = "pdf")
+
+# =========================
+# Putative type
+# =========================
+
+umap_df$put_type <- as.factor(umap_df$put_type)
+
+ggplot(umap_df, aes(UMAP1, UMAP2, color = put_type)) +
+  geom_point(size = 2) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  theme_classic2() +
+  labs(title = "UMAP colored by experimenter rating", color = "Putative cell type")
+
+ggplot(umap_df, aes(UMAP1, UMAP2, color = put_type)) +
+  geom_point(size = 2) +
+  facet_wrap(~put_type) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  theme_classic2() +
+  labs(title = "UMAP Plots by Putative Type", color = "Putative Type")
+
+# =========================
+# Resection area (redundant exploratory plots)
+# =========================
+
+ggplot(umap_df, aes(UMAP1, UMAP2, color = area)) +
+  geom_point(size = 2) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  theme_classic2() +
+  labs(title = "UMAP colored by resection area", color = "Resection area")
+
+ggplot(umap_df, aes(UMAP1, UMAP2, color = area)) +
+  geom_point(size = 2) +
+  facet_wrap(~area) +
+  scale_color_viridis(discrete = TRUE, option = "D") +
+  theme_classic2() +
+  labs(title = "UMAP Plots by Resection Area", color = "Area")
+
+# =========================
+# Highlight specific cells
+# =========================
+
+ggplot(umap_df, aes(UMAP1, UMAP2, color = cluster_label, shape = ident)) +
+  geom_point(size = 1.5, alpha = 0.3) +
+  geom_point(
+    data = umap_df %>% filter(cell %in% c(
+      "E437-2",
+      "E384-4",
+      "E388-3"
+    )),
+    aes(UMAP1, UMAP2, color = cluster_label),
+    size = 3,
+    alpha = 1
+  ) +
+  scale_color_manual(values = my_colors) +
+  scale_shape_manual(values = c("DCF+" = 16, "WFA+" = 1)) +
+  labs(x = "UMAP1", y = "UMAP2", color = "Cluster", shape = "Identification") +
+  theme_classic2() +
+  theme(
+    axis.text.x = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 6)
+  )
+```
+
+\large
+# 6 Exploration of anatomical markers (PV and SST) within electrophysiology (Figure 3)
+- Extend df_anat with immunohistochemistry-based costaining labels (PV, SST), including clear, potentially positive/negative, and ambiguous categories
+- Merge anatomical data with UMAP coordinates, clustering results, metadata, and electrophysiological parameters via cell ID
+- Generate summary tables of costaining distributions across groups
+- Subset PV+ and SST+ populations for downstream analyses
+1. Define groups based on immunohistochemical labeling (PV or SST)
+2. Visualize PV+ and SST+ cells in UMAP space, highlighting them on the global embedding (**Fig. 3A–C**)
+3. Compare electrophysiological properties between DCF+ and WFA+ within PV+ cells using parameter-wise analyses (violin/box plots)
+4. Perform Fisher’s exact tests (and descriptive chi-square comparisons) to assess associations between cell identity (DCF/WFA) and PV/SST positivity, reporting effect sizes and p-values
+```{r}
+# ------------------------------
+# --- Add costaining labels ---
+# ------------------------------
+
+df_anat <- df_anat_raw %>%
+  mutate(
+    anat_dist = anat_dist * 10^-3,
+
+    anat_costain = case_when(
+      is.na(anat_morph) ~ "no rec",
+      anat_pv == "+" & anat_sst == "+" ~ "pv+sst+",
+      anat_pv == "+" & anat_sst == "-" ~ "pv+",
+      anat_sst == "+" & anat_pv == "-" ~ "sst+",
+      anat_pv == "?" & anat_sst == "-" ~ "potentially pv+",
+      anat_sst == "?" & anat_pv == "-" ~ "potentially sst+",
+      anat_pv == "-" & anat_sst == "-" ~ "both costains negative",
+      TRUE ~ "unclear"
+    ),
+
+    anat_pv = case_when(
+      is.na(anat_morph) ~ "no rec",
+      anat_pv == "+" ~ "pv_pos",
+      anat_pv == "-" ~ "pv_neg",
+      anat_pv == "?" ~ "unclear"
+    ),
+
+    anat_sst = case_when(
+      is.na(anat_morph) ~ "no rec",
+      anat_sst == "+" ~ "sst_pos",
+      anat_sst == "-" ~ "sst_neg",
+      anat_sst == "?" ~ "unclear"
+    )
+  )
+
+# ------------------------------
+# --- Merge anatomical + UMAP + electrophysiology ---
+# ------------------------------
+
+df_anat <- umap_df %>%
+  left_join(
+    df_anat %>%
+      dplyr::select(cell, anat_morph, anat_costain, anat_pv, anat_sst, anat_dist),
+    by = "cell"
+  ) %>%
+  left_join(
+    df_int %>%
+      dplyr::select(-ident, -put_type, -hclust, -cluster_label),
+    by = "cell"
+  )
+
+# Convert to factors
+df_anat <- df_anat %>%
+  mutate(
+    anat_costain = factor(anat_costain),
+    anat_pv      = factor(anat_pv),
+    anat_sst     = factor(anat_sst),
+    anat_morph   = factor(anat_morph)
+  )
+
+# ------------------------------
+# --- Descriptive statistics ---
+# ------------------------------
+
+cat("PV costaining\n")
+table(df_anat$ident, df_anat$anat_pv)
+
+cat("\nSST costaining\n")
+table(df_anat$ident, df_anat$anat_sst)
+
+cat("\nMorphology\n")
+table(df_anat$ident, df_anat$anat_morph)
+
+table(df_anat$anat_morph, df_anat$anat_pv)
+table(df_anat$anat_morph, df_anat$anat_sst)
+
+# ------------------------------
+# --- Primary Fisher analysis (PV only, no unclear) ---
+# ------------------------------
+
+df_primary <- df_anat %>%
+  filter(anat_pv %in% c("pv_pos", "pv_neg")) %>%
+  droplevels()
+
+cont_table  <- table(df_primary$ident, df_primary$anat_pv)
+cont_table2 <- table(df_primary$cluster_label, df_primary$anat_pv)
+
+cont_table
+fisher.test(cont_table)
+
+cont_table2
+fisher.test(cont_table2)
+
+# ------------------------------
+# --- Summary costaining distribution ---
+# ------------------------------
+
+summary_table <- table(df_anat$anat_costain)
+summary_table
+
+# ------------------------------
+# --- Counts of PV+ cells ---
+# ------------------------------
+
+n_dcf_pv <- df_anat %>%
+  filter(ident == "DCF+", anat_costain == "pv+") %>%
+  nrow()
+
+n_wfa_pv <- df_anat %>%
+  filter(ident == "WFA+", anat_costain == "pv+") %>%
+  nrow()
+
+cat("Number of DCF+ PV+ cells:", n_dcf_pv, "\n")
+cat("Number of WFA+ PV+ cells:", n_wfa_pv, "\n")
+
+# ------------------------------
+# --- Additional contingency tests ---
+# ------------------------------
+
+fisher_mat <- matrix(
+  c(20, 31,   # WFA
+    12, 52),  # DCF
+  nrow = 2,
+  byrow = TRUE
+)
+
+fisher.test(fisher_mat)
+
+table(df_anat$ident, df_anat$anat_costain, useNA = "ifany")
+table(df_anat$anat_morph, df_anat$cluster_label, useNA = "ifany")
+table(df_anat$anat_morph, df_anat$anat_costain, useNA = "ifany")
+table(df_anat$anat_morph, df_anat$ident, useNA = "ifany")
+
+# ------------------------------
+# --- Summary statistics per costain group ---
+# ------------------------------
+
+table_anat_groups <- df_anat %>%
+  group_by(anat_costain) %>%
+  summarise(
+    across(
+      all_of(c(
+        "RMP", "CC_Rm", "CC_tau", "sag_ratio", "freq_max", "f_i_slope",
+        "isi_adapt", "amp_adapt", "ap_thresh", "ap_width", "ap_rise",
+        "ap_decay", "fAHP_amp"
+      )),
+      list(
+        n    = ~sum(!is.na(.)),
+        mean = ~mean(., na.rm = TRUE),
+        sd   = ~sd(., na.rm = TRUE),
+        med  = ~median(., na.rm = TRUE),
+        min  = ~min(., na.rm = TRUE),
+        max  = ~max(., na.rm = TRUE)
+      ),
+      .names = "{.col}_{.fn}"
+    ),
+    .groups = "drop"
+  )
+
+table_anat_groups
+
+# --------------------------------------------
+# --- Figure 3C: UMAP with PV+ highlighted ---
+# --------------------------------------------
+
+df_anat_pv <- df_anat %>%
+  filter(anat_pv == "pv_pos")
+
+fig_3PV <- ggplot(df_anat, aes(x = UMAP1, y = UMAP2)) +
+  # background cells
+  geom_point(
+    aes(shape = ident, color = cluster_label),
+    size = 0.9,
+    alpha = 0.1
+  ) +
+  # PV+ highlighted
+  geom_point(
+    data = df_anat_pv,
+    aes(shape = ident, color = cluster_label),
+    size = 1.5,
+    alpha = 1
+  ) +
+  scale_shape_manual(values = c("DCF+" = 16, "WFA+" = 1), name = "Identification") +
+  scale_color_manual(values = my_colors, name = "Cluster") +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_classic2() +
+  theme(
+    axis.text.x  = element_text(size = 6),
+    axis.text.y  = element_text(size = 6),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    legend.text  = element_text(size = 6),
+    axis.line    = element_line(size = 0.3),
+    axis.ticks   = element_line(size = 0.3)
+  )
+
+print(fig_3PV)
+save_fig(fig_3PV, "Fig_3C_UMAP_PV", w = 275/96, h = 150/96, device = "pdf")
+
+
+# --------------------------------------------
+# --- Figure: UMAP with SST+ highlighted ---
+# --------------------------------------------
+
+df_anat_sst <- df_anat %>%
+  filter(anat_sst == "sst_pos")
+
+fig_3sst <- ggplot(df_anat, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(
+    aes(shape = ident, color = cluster_label),
+    size = 0.9,
+    alpha = 0.1
+  ) +
+  geom_point(
+    data = df_anat_sst,
+    aes(shape = ident, color = cluster_label),
+    size = 1.5,
+    alpha = 1
+  ) +
+  scale_shape_manual(values = c("DCF+" = 16, "WFA+" = 1), name = "Identification") +
+  scale_color_manual(values = my_colors, name = "Cluster") +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_classic2() +
+  theme(
+    axis.text.x  = element_text(size = 6),
+    axis.text.y  = element_text(size = 6),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    legend.text  = element_text(size = 6),
+    axis.line    = element_line(size = 0.3),
+    axis.ticks   = element_line(size = 0.3)
+  )
+
+print(fig_3sst)
+
+# --------------------------------------------
+# --- UMAP: morphology overlay ---
+# --------------------------------------------
+
+ggplot(df_anat, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(
+    aes(color = anat_morph, shape = ident),
+    size = 1.2,
+    alpha = 1
+  ) +
+  scale_shape_manual(values = c("DCF+" = 16, "WFA+" = 1), name = "Identification") +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_classic2() +
+  theme(
+    axis.text.x  = element_text(size = 6),
+    axis.text.y  = element_text(size = 6),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    legend.text  = element_text(size = 6)
+  )
+
+# -------------------------------------------------
+# --- Figure 3D: pairwise comparisons, PV+ only ---
+# -------------------------------------------------
+
+# ------------------------------
+# --- Reshape data ---
+# ------------------------------
+
+df_anat_pv_long <- df_anat_pv %>%
+  pivot_longer(
+    cols = all_of(param_names),
+    names_to = "Parameter",
+    values_to = "Value"
+  ) %>%
+  filter(!is.na(Parameter), Parameter %in% custom_params)
+
+# ------------------------------
+# --- Statistical testing ---
+# ------------------------------
+
+p_values_pv <- df_anat_pv_long %>%
+  group_by(Parameter) %>%
+  nest() %>%
+  mutate(
+    # Shapiro normality per group
+    normality = map(data, ~ .x %>%
+      group_by(ident) %>%
+      summarise(
+        p_shapiro = shapiro.test(Value)$p.value,
+        .groups = "drop"
+      )
+    ),
+
+    # normality decision
+    is_normal = map_lgl(normality, ~ all(.x$p_shapiro > 0.05)),
+
+    # appropriate test
+    p_value = map2_dbl(data, is_normal, ~ {
+      if (.y) {
+        t.test(Value ~ ident, data = .x)$p.value
+      } else {
+        wilcox.test(Value ~ ident, data = .x, exact = FALSE)$p.value
+      }
+    }),
+
+    test_used = if_else(is_normal, "t-test", "wilcoxon")
+  ) %>%
+  ungroup() %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "fdr"),
+    sig_label = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE ~ "ns"
+    )
+  ) %>%
+  select(Parameter, test_used, p_value, p_adj, sig_label)
+
+print(p_values_pv)
+
+# ------------------------------
+# --- Annotation positions ---
+# ------------------------------
+
+y_positions <- df_anat_pv_long %>%
+  group_by(Parameter) %>%
+  summarise(
+    y.position = max(Value, na.rm = TRUE) +
+      0.15 * abs(max(Value, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+stat_anno <- p_values_pv %>%
+  left_join(y_positions, by = "Parameter") %>%
+  mutate(
+    group1 = "DCF+",
+    group2 = "WFA+",
+    label = case_when(
+      p_adj < 0.05 ~ sig_label,
+      p_adj < 0.1  ~ sprintf("p = %.3f", p_adj),
+      TRUE ~ "ns"
+    )
+  )
+
+# ------------------------------
+# --- Plot function template ---
+# ------------------------------
+
+plot_pv_params <- function(data, anno, params, out_name, height) {
+
+  data_sel <- filter(data, Parameter %in% params)
+  anno_sel <- filter(anno, Parameter %in% params)
+
+  ggplot(data_sel, aes(x = ident, y = Value, color = ident)) +
+    coord_cartesian(clip = "off") +
+    geom_jitter(width = 0.1, size = 0.6, alpha = 1, na.rm = TRUE) +
+    geom_violin(width = 0.7, trim = TRUE, alpha = 0.25, linewidth = 0.3, na.rm = TRUE) +
+    geom_boxplot(width = 0.15, outlier.shape = NA, color = "black",
+                 alpha = 0.3, size = 0.3, na.rm = TRUE) +
+    stat_pvalue_manual(
+      anno_sel,
+      label = "label",
+      y.position = anno_sel$y.position,
+      tip.length = 0.01,
+      size = 2,
+      bracket.size = 0.3,
+      hide.ns = TRUE
+    ) +
+    scale_color_manual(values = my_colors) +
+    facet_wrap(
+      ~factor(Parameter, levels = params),
+      scales = "free_y",
+      ncol = 3,
+      labeller = as_labeller(param_dict),
+      drop = FALSE,
+      as.table = TRUE
+    ) +
+    labs(title = NULL, x = NULL, y = NULL) +
+    theme_classic(base_size = 14) +
+    theme(
+      panel.grid = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 6),
+      axis.text.y = element_text(size = 6, color = "black"),
+      axis.line = element_line(color = "black", linewidth = 0.3),
+      axis.ticks = element_line(linewidth = 0.3),
+      strip.background = element_blank(),
+      strip.text = element_text(size = 8, face = "plain", margin = margin(b = 10)),
+      legend.position = "none",
+      plot.margin = margin(t = 15, r = 5, b = 5, l = 5)
+    )
+}
+
+# ------------------------------
+# --- Full PV panel ---
+# ------------------------------
+
+fig_params_pv <- plot_pv_params(
+  df_anat_pv_long,
+  stat_anno,
+  custom_params,
+  "Suppl_Fig_5_all_params_PV",
+  height = 540/96
+)
+
+print(fig_params_pv)
+save_fig(fig_params_pv, "Suppl_Fig_5_all_params_PV", w = 280/96, h = 540/96)
+
+# ------------------------------
+# --- Selected parameters ---
+# ------------------------------
+
+selected_params <- c("CC_tau", "ap_width", "freq_max")
+
+fig_params_pv_sel <- plot_pv_params(
+  df_anat_pv_long,
+  stat_anno,
+  selected_params,
+  "Fig_3D_params_PV",
+  height = 180/96
+)
+
+print(fig_params_pv_sel)
+save_fig(fig_params_pv_sel, "Fig_3D_params_PV", w = 280/96, h = 180/96) 
+```
+
+\large
+# 6.1 Analysis and plotting of depth information
+- import and merge IMARIS-derived depth datasets from three human patient samples, standardize column names, and combine into a unified dataframe
+- assign patient identity as factor and extract cortical depth (distance from pia) for downstream analysis
+- perform descriptive statistics and test depth normality (Shapiro–Wilk)
+- compare depth between DCF+ and WFA+ cells using t-test and summarize group-wise SEM statistics
+- test depth differences across clusters using ANOVA with Tukey post hoc comparisons
+- visualize UMAP with depth as continuous feature (grey background for all cells, depth-colored overlay for reconstructed cells, PV+ cells highlighted)
+- plot depth distributions for identification groups and clusters using jitter + boxplots (with optional violin overlays)
+- reverse y-axis to reflect cortical depth organization (pia → deep layers)
+- integrate IMARIS layer annotations (L2/3, L4, L5/6) to visualize layer-specific depth distributions across patients using faceted plots
+- provide alternative visual encodings (color-coded layers vs patient-coded distributions) to assess inter-individual variability
+```{r}
+library(gghalves)
+library(patchwork)
+library(janitor)
+library(rstatix)
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+# ------------------
+# --- Load IMARIS depth data ---
+# ------------------
+
+df_pat1 <- read_csv(file.path("data", "WFA_HUMAN_QUANT_IMARIS_PatA.csv")) %>%
+  mutate(pat = "Patient A")
+
+df_pat2 <- read_csv(file.path("data", "WFA_HUMAN_QUANT_IMARIS_PatB.csv")) %>%
+  mutate(pat = "Patient B")
+
+df_pat3 <- read_csv(file.path("data", "WFA_HUMAN_QUANT_IMARIS_PatC.csv")) %>%
+  mutate(pat = "Patient C")
+
+highlight_colors <- c(
+  "Patient A" = "#A6CEE3",
+  "Patient B" = "#F4A3C4",
+  "Patient C" = "#FDBF6F"
+)
+
+df_depth <- bind_rows(df_pat1, df_pat2, df_pat3) %>%
+  rename(depth = `Distance from pia (µm)`) %>%
+  clean_names() %>%
+  rename(net_volume = net_volume_mm3) %>%
+  mutate(pat = factor(pat, levels = names(highlight_colors)))
+
+max_depth <- max(df_depth$depth, na.rm = TRUE)
+
+# ------------------
+# --- Descriptive stats ---
+# ------------------
+
+shapiro.test(df_anat$anat_dist)
+
+mean_anat <- mean(df_anat$anat_dist, na.rm = TRUE)
+sem_anat  <- sd(df_anat$anat_dist, na.rm = TRUE) /
+  sqrt(sum(!is.na(df_anat$anat_dist)))
+
+sprintf("%.2f ± %.2f", mean_anat, sem_anat)
+
+t.test(anat_dist ~ ident, data = df_anat)
+
+sem_table <- df_anat %>%
+  filter(ident %in% c("DCF+", "WFA+")) %>%
+  group_by(ident) %>%
+  summarise(
+    n = sum(!is.na(anat_dist)),
+    mean = mean(anat_dist, na.rm = TRUE),
+    sd = sd(anat_dist, na.rm = TRUE),
+    sem = sd / sqrt(n),
+    .groups = "drop"
+  )
+
+anova_model <- aov(anat_dist ~ cluster_label, data = df_anat)
+summary(anova_model)
+TukeyHSD(anova_model)
+
+sem_table2 <- df_anat %>%
+  group_by(cluster_label) %>%
+  summarise(
+    n = sum(!is.na(anat_dist)),
+    mean = mean(anat_dist, na.rm = TRUE),
+    sd = sd(anat_dist, na.rm = TRUE),
+    sem = sd / sqrt(n),
+    .groups = "drop"
+  )
+
+# ------------------
+# --- Figure 3B: UMAP depth ---
+# ------------------
+
+fig_3depth <- ggplot(df_anat, aes(UMAP1, UMAP2)) +
+  geom_point(color = "grey50", size = 0.4, alpha = 0.15) +
+  geom_point(
+    data = subset(df_anat, !is.na(anat_dist)),
+    aes(color = anat_dist),
+    size = 0.6, alpha = 0.9
+  ) +
+  geom_point(
+    data = df_anat_pv,
+    aes(color = anat_dist),
+    size = 0.6, alpha = 1
+  ) +
+  scale_color_scico(name = "distance from pia (µm)", palette = "lajolla") +
+  labs(x = "UMAP1", y = "UMAP2") +
+  theme_classic2() +
+  theme(
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 6),
+    axis.line = element_line(size = 0.3),
+    axis.ticks = element_line(size = 0.3)
+  )
+
+print(fig_3depth)
+save_fig(fig_3depth, "Fig_3B_umap_depth", w = 250/96, h = 180/96, device = "pdf")
+
+# ------------------
+# --- Depth distributions (Fig 3A) ---
+# ------------------
+
+p1_wfa_dcf <- df_anat %>%
+  filter(!is.na(anat_dist)) %>%
+  ggplot(aes(ident, anat_dist, color = ident)) +
+  geom_jitter(width = 0.15, size = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.10, alpha = 0.3, size = 0.3,
+               position = position_nudge(x = -0.25),
+               outlier.shape = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+  scale_y_reverse(limits = c(max_depth, 0)) +
+  scale_color_manual(values = my_colors) +
+  labs(x = "in situ identification", y = "distance from pia (µm)") +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "none",
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6)
+  )
+
+p2_clusters <- df_anat %>%
+  filter(!is.na(anat_dist)) %>%
+  ggplot(aes(cluster_label, anat_dist, color = cluster_label)) +
+  geom_jitter(width = 0.15, size = 0.4, alpha = 0.7) +
+  geom_boxplot(width = 0.10, alpha = 0.3, size = 0.3,
+               position = position_nudge(x = -0.25),
+               outlier.shape = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+  scale_y_reverse(limits = c(max_depth, 0)) +
+  scale_color_manual(values = my_colors[c("classical FSI","borderline-FSI","non-FSI")]) +
+  labs(x = "cluster", y = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+fig3_cell_depth_v1 <- (p1_wfa_dcf | p2_clusters) +
+  plot_layout(widths = c(4, 5), axes = "collect_x", axis_titles = "collect_x")
+
+print(fig3_cell_depth_v1)
+save_fig(fig3_cell_depth_v1, "Fig_3A_cell_depth_v1", w = 350/96, h = 200/96, device = "pdf")
+
+# ------------------
+# --- Version 2 (greyscale variant) ---
+# ------------------
+
+p3_wfa_dcf <- df_anat %>%
+  filter(!is.na(anat_dist)) %>%
+  ggplot(aes(ident, anat_dist)) +
+  geom_jitter(width = 0.15, size = 0.4, color = "gray50") +
+  geom_boxplot(width = 0.1, alpha = 0.3, size = 0.3,
+               outlier.shape = NA,
+               position = position_nudge(x = -0.25)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+  scale_y_reverse(limits = c(max_depth, 0)) +
+  labs(x = "in situ identification", y = "distance from pia (µm)") +
+  theme_classic(base_size = 12)
+
+p4_clusters <- df_anat %>%
+  filter(!is.na(anat_dist)) %>%
+  ggplot(aes(cluster_label, anat_dist)) +
+  geom_jitter(width = 0.15, size = 0.4, color = "gray50") +
+  geom_boxplot(width = 0.1, alpha = 0.3, size = 0.3,
+               outlier.shape = NA,
+               position = position_nudge(x = -0.25)) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+  scale_y_reverse(limits = c(max_depth, 0)) +
+  labs(x = "cluster", y = NULL) +
+  theme_classic(base_size = 12)
+
+fig3_cell_depth_v2 <- (p3_wfa_dcf | p4_clusters) +
+  plot_layout(widths = c(4, 5), axes = "collect_x", axis_titles = "collect_x")
+
+print(fig3_cell_depth_v2)
+save_fig(fig3_cell_depth_v2, "Fig_3A_cell_depth_v2", w = 350/96, h = 200/96, device = "pdf")
+
+# ------------------
+# --- Version 3 (IMARIS layers) ---
+# ------------------
+
+p_depth_layers <- df_depth %>%
+  filter(layer %in% c("L2_3", "L4", "L5_6")) %>%
+  ggplot(aes(1, depth, fill = layer, color = layer)) +
+  geom_half_violin(side = "r", alpha = 0.3, width = 1.5, trim = TRUE, color = NA) +
+  geom_jitter(width = 0.1, size = 0.6, alpha = 0.7) +
+  geom_boxplot(width = 0.1, alpha = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+  scale_y_reverse(limits = c(max_depth, 0)) +
+  facet_wrap(~pat, ncol = 3, scales = "fixed", strip.position = "bottom") +
+  scale_fill_manual(values = c(L2_3 = "grey80", L4 = "grey50", L5_6 = "grey10")) +
+  scale_color_manual(values = c(L2_3 = "grey80", L4 = "grey50", L5_6 = "grey10")) +
+  labs(x = "patient", y = "distance from pia (µm)") +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 6),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none"
+  )
+
+p_depth_patients <- df_depth %>%
+  filter(layer %in% c("L2_3", "L4", "L5_6")) %>%
+  ggplot(aes(1, depth, fill = pat, color = pat)) +
+  geom_half_violin(aes(group = layer), side = "r", alpha = 0.3, trim = TRUE, color = NA) +
+  geom_jitter(width = 0.1, size = 0.2, alpha = 0.7) +
+  geom_boxplot(aes(group = layer), width = 0.5, alpha = 0.3, size = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+  scale_y_reverse(limits = c(max_depth, 0), position = "right") +
+  facet_wrap(~pat, ncol = 3, scales = "fixed", strip.position = "bottom") +
+  scale_fill_manual(values = highlight_colors) +
+  scale_color_manual(values = highlight_colors) +
+  labs(x = "patient", y = "distance from pia (µm)") +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.text = element_text(size = 6),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none"
+  )
+
+fig3_cell_depth_v3 <- (p3_wfa_dcf | p4_clusters | p_depth_layers) +
+  plot_layout(widths = c(4, 6, 7), axes = "collect_x", axis_titles = "collect_x")
+
+print(fig3_cell_depth_v3)
+save_fig(fig3_cell_depth_v3, "Fig_3A_cell_depth_v3", w = 550/96, h = 200/96, device = "pdf")
+```
