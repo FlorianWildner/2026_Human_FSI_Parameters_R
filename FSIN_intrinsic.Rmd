@@ -3,10 +3,10 @@ title: "Human FSI intrinsic ephys parameters analysis"
 author: "Florian Wildner"
 date: "14.04.2026"
 output:
-  html_document: default
+  html_document: 
+    encoding: UTF-8
 
 # Version notes
-version: "16.12 – inclusion of anatomy data"
 last_changes: "Reordered protocols to align with manuscript structure"
 ---
 
@@ -1089,6 +1089,171 @@ print(loo_results)
 ```
 
 \small
+## 3.2.1: Cluster quality check
+1. Compare RMP and input resistance between clusters 
+2. output "cluster_comparison.csv"
+\tiny
+```{r}
+# =========================
+# Cluster quality check
+# VC_Rs and RMP between clusters "classical FSI" and "borderline-FSI"
+# =========================
+
+# Subset the data for the two groups (Clusters)
+df_subset_clusters <- df_int %>%
+  filter(cluster_label %in% c("classical FSI", "borderline-FSI", "non-FSI")) %>%
+  left_join(
+    df %>% dplyr::select(cell, VC_Rs),
+    by = "cell"
+  )
+
+# VC_Rs comparison
+fig_Rs_clusters <- ggplot(df_subset_clusters, aes(cluster_label, VC_Rs, fill = cluster_label)) +
+  geom_boxplot() +
+  geom_point(position = position_jitter(width = 0.1), size = 1) +
+  scale_fill_manual(values = my_colors) +
+  theme_minimal() +
+  labs(x = "Group", y = "VC_Rs")
+print(fig_Rs_clusters)
+
+
+# Same for RMP
+fig_RMP_clusters <- ggplot(df_subset_clusters, aes(cluster_label, RMP, fill = cluster_label)) +
+  geom_boxplot() +
+  geom_point(position = position_jitter(width = 0.1), size = 1) +
+  scale_fill_manual(values = my_colors) +
+  theme_minimal()
+print(fig_RMP_clusters)
+
+# ==========================
+# Summary table
+# ==========================
+
+# Function to calculate mean ± SEM
+mean_sem <- function(x) {
+  sprintf("%.2f ± %.2f",
+          mean(x, na.rm = TRUE),
+          sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x))))
+}
+
+# VC_Rs statistics
+VC_stats <- df_subset_clusters %>%
+  group_by(cluster_label) %>%
+  summarise(value = mean_sem(VC_Rs), .groups = "drop")
+
+# Normality tests
+shapiro_classical <- shapiro.test(df_subset_clusters$VC_Rs[df_subset_clusters$cluster_label == "classical FSI"])
+shapiro_borderline <- shapiro.test(df_subset_clusters$VC_Rs[df_subset_clusters$cluster_label == "borderline-FSI"])
+shapiro_nonFSI <- shapiro.test(df_subset_clusters$VC_Rs[df_subset_clusters$cluster_label == "non-FSI"])
+
+all_normal <- all(c(
+  shapiro_classical$p.value,
+  shapiro_borderline$p.value,
+  shapiro_nonFSI$p.value
+) > 0.05)
+
+if (all_normal) {
+
+  # PARAMETRIC: one-way ANOVA
+  vc_model <- aov(VC_Rs ~ cluster_label, data = df_subset_clusters)
+  VC_p <- summary(vc_model)[[1]][["Pr(>F)"]][1]
+  test_used <- "ANOVA"
+
+} else {
+
+  # NON-PARAMETRIC: Kruskal-Wallis
+  kw <- kruskal.test(VC_Rs ~ cluster_label, data = df_subset_clusters)
+  VC_p <- kw$p.value
+  test_used <- "Kruskal-Wallis"
+  print(kw)
+  H <- as.numeric(kw$statistic)
+  k <- length(unique(df_subset_clusters$cluster_label))
+  n <- sum(!is.na(df_subset_clusters$VC_Rs))
+  
+  epsilon_sq <- (H / ((n^2 - 1) / (n + 1)))
+  epsilon_sq
+}
+print(test_used)
+print(VC_p)
+
+# RMP statistics
+RMP_stats <- df_subset_clusters %>%
+  group_by(cluster_label) %>%
+  summarise(value = mean_sem(RMP), .groups = "drop")
+
+# Shapiro-Wilk normality test for each group
+shapiro_classical <- shapiro.test(df_subset_clusters$RMP[df_subset_clusters$cluster_label == "classical FSI"])
+shapiro_borderline <- shapiro.test(df_subset_clusters$RMP[df_subset_clusters$cluster_label == "borderline-FSI"])
+shapiro_nonFSI <- shapiro.test(df_subset_clusters$RMP[df_subset_clusters$cluster_label == "non-FSI"])
+
+all_normal <- all(c(
+  shapiro_classical$p.value,
+  shapiro_borderline$p.value,
+  shapiro_nonFSI$p.value
+) > 0.05)
+
+if (all_normal) {
+
+  # PARAMETRIC: one-way ANOVA
+  rmp_model <- aov(RMP ~ cluster_label, data = df_subset_clusters)
+  RMP_p <- summary(rmp_model)[[1]][["Pr(>F)"]][1]
+
+  print("ANOVA result for RMP:")
+  print(summary(rmp_model))
+
+  test_used_rmp <- "ANOVA"
+  
+  # Post hoc (Tukey HSD)
+  rmp_posthoc <- TukeyHSD(rmp_model)
+  
+  print("Post hoc Tukey HSD:")
+  print(rmp_posthoc)
+
+} else {
+
+  # NON-PARAMETRIC: Kruskal-Wallis
+  rmp_kw <- kruskal.test(RMP ~ cluster_label, data = df_subset_clusters)
+  RMP_p <- rmp_kw$p.value
+
+  print("Kruskal-Wallis result for RMP:")
+  print(rmp_kw)
+
+  test_used_rmp <- "Kruskal-Wallis"
+}
+
+print(test_used_rmp)
+print(RMP_p)
+
+# Create summary table
+summary_table <- data.frame(
+  Variable = c("VC_Rs", "RMP"),
+  `classical FSI` = c(
+    VC_stats$value[VC_stats$cluster_label == "classical FSI"],
+    RMP_stats$value[RMP_stats$cluster_label == "classical FSI"]
+  ),
+  `borderline-FSI` = c(
+    VC_stats$value[VC_stats$cluster_label == "borderline-FSI"],
+    RMP_stats$value[RMP_stats$cluster_label == "borderline-FSI"]
+  ),
+  `non-FSI` = c(
+    VC_stats$value[VC_stats$cluster_label == "non-FSI"],
+    RMP_stats$value[RMP_stats$cluster_label == "non-FSI"]
+  ),
+  `p-value` = c(
+    signif(VC_p, 3),
+    signif(RMP_p, 3)
+  ),
+  check.names = FALSE
+)
+
+print(summary_table)
+write_csv(
+  summary_table,
+  file.path(out_dir, "cluster_comparison_table.csv")
+)
+```
+
+\small
 ## 3.3: LDA of cluster 1 (classical FSI) vs. cluster 3 (borderline-FSI)
 1. Assign hierarchical cluster labels (k = 3 solution) to df_int.
 2. Subset dataset to Cluster 1 and Cluster 3 only.
@@ -1278,6 +1443,15 @@ save_fig(
 df_int$ident <- as.factor(df_int$ident)
 df_int$hclust <- as.factor(df_int$hclust)
 df_int$cluster_label <- as.factor(df_int$cluster_label)
+
+# =========================
+# Percentage of clusters per ident
+# =========================
+
+df_int %>%
+  count(ident, cluster_label) %>%
+  group_by(ident) %>%
+  mutate(percent = round(100 * n / sum(n), 2))
 
 # =========================
 # Stacked bar plot
@@ -2197,7 +2371,7 @@ p_values_pv <- df_anat_pv_long %>%
       TRUE ~ "ns"
     )
   ) %>%
-  select(Parameter, test_used, p_value, p_adj, sig_label)
+  dplyr::select(Parameter, test_used, p_value, p_adj, sig_label)
 
 print(p_values_pv)
 
