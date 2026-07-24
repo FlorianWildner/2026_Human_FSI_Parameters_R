@@ -90,14 +90,9 @@ col <- c(
 )
 
 df_original <- read_csv(
-  "/Users/flo/Desktop/research/Human/Human_data/intrinsic_properties/Human_IN_Properties_260124.csv",
+  file.path("data", "Human_IN_Properties.csv"),
   col_types = col
 )
-
-# df_original <- read_csv(
-#   file.path("data", "Human_IN_Properties.csv"),
-#   col_types = col
-# )
 
 # -----------------------------
 # Filter datasets
@@ -1099,6 +1094,26 @@ print(loo_results)
 # VC_Rs and RMP between clusters "classical FSI" and "borderline-FSI"
 # =========================
 
+# =========================
+# Cluster assignment
+# =========================
+
+df_int$hclust <- factor(cutree(hc, k = 3))
+
+df_int <- df_int %>%
+  mutate(
+    cluster_label = recode(
+      as.character(hclust),
+      "1" = "classical FSI",
+      "2" = "non-FSI",
+      "3" = "borderline-FSI"
+    ),
+    cluster_label = factor(
+      cluster_label,
+      levels = c("classical FSI", "borderline-FSI", "non-FSI")
+    )
+  )
+
 # Subset the data for the two groups (Clusters)
 df_subset_clusters <- df_int %>%
   filter(cluster_label %in% c("classical FSI", "borderline-FSI", "non-FSI")) %>%
@@ -1271,27 +1286,7 @@ library(ggplot2)
 library(tidyr)
 
 # =========================
-# 1. Cluster assignment
-# =========================
-
-df_int$hclust <- factor(cutree(hc, k = 3))
-
-df_int <- df_int %>%
-  mutate(
-    cluster_label = recode(
-      as.character(hclust),
-      "1" = "classical FSI",
-      "2" = "non-FSI",
-      "3" = "borderline-FSI"
-    ),
-    cluster_label = factor(
-      cluster_label,
-      levels = c("classical FSI", "borderline-FSI", "non-FSI")
-    )
-  )
-
-# =========================
-# 2. Subset: clusters 1 vs 3
+# 1. Subset: clusters 1 vs 3
 # =========================
 
 df_clusters13 <- df_int %>%
@@ -1303,7 +1298,7 @@ df_c13_numeric <- df_clusters13[, c(numeric_cols, "hclust")]
 df_c13_numeric$hclust <- factor(df_c13_numeric$hclust)
 
 # =========================
-# 3. Scaling + LDA
+# 2. Scaling + LDA
 # =========================
 
 df_c13_scaled <- data.frame(
@@ -1317,7 +1312,7 @@ lda_c13_fit <- lda(hclust ~ ., data = df_c13_scaled)
 lda_c13_pred <- predict(lda_c13_fit)
 
 # =========================
-# 4. Classification performance
+# 3. Classification performance
 # =========================
 
 c13_conf_matrix <- table(
@@ -1331,7 +1326,7 @@ print(c13_conf_matrix)
 cat("Clusters 1 vs 3 LDA Accuracy:", round(c13_accuracy * 100, 1), "%\n")
 
 # =========================
-# 5. LDA coefficients
+# 4. LDA coefficients
 # =========================
 
 lda_coef <- lda_c13_fit$scaling[, 1]
@@ -1348,7 +1343,7 @@ write_csv(
 )
 
 # =========================
-# 6. LD1 density plot
+# 5. LD1 density plot
 # =========================
 
 df_c13_scaled$LD1 <- lda_c13_pred$x[, 1]
@@ -1368,7 +1363,7 @@ print(p_lda_c13)
 save_fig(p_lda_c13, "Suppl_Fig_2E_LDA_Cluster", w = 2, h = 1.4, dev = "pdf")
 
 # =========================
-# 7. Top 10 discriminators
+# 6. Top 10 discriminators
 # =========================
 
 top10_coef <- head(coef_df_c13, 10)
@@ -1389,7 +1384,7 @@ ggsave(
 )
 
 # =========================
-# 8. Raw distributions of top 10
+# 7. Raw distributions of top 10
 # =========================
 
 top10_raw_names <- names(lda_coef)[order(abs(lda_coef), decreasing = TRUE)[1:10]]
@@ -1435,7 +1430,6 @@ save_fig(
 4. Export figure (**Fig. 2B**) for publication.
 \tiny
 ```{r}
-
 # =========================
 # Ensure factor structure
 # =========================
